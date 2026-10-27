@@ -76,18 +76,35 @@ Trusted publishing — no API tokens:
 3. `git tag v0.1.0 && git push --tags` → the workflow runs `uv build` and
    publishes.
 
-## Harness runtime (phase 0)
+## Harness runtime
 
-In a project initialized with [harness-standard](https://github.com/jordimarsal/harness):
+In a project initialized with [harness](https://github.com/jordimarsal/harness):
 
 ```bash
-buildwright harness status          # feature board + planned role -> model routing
-buildwright harness status ~/src/kafka-adapter-telemetry
+buildwright harness status                          # board + planned routing (read-only)
+buildwright harness run                             # ONE supervised implementer batch
+buildwright harness run --feature f3_dashboard      # specific feature
 ```
 
-Read-only: parses and schema-validates `harness/feature_list.json` (protocol v1),
-shows the board and which model each role would use. Phases 1+ (unattended
-implement→verify→review in a worktree) are designed in
+- `status` parses and schema-validates `harness/feature_list.json` (protocol v1)
+  and shows the board plus which model each role would use.
+- `run` (phase 1) picks the first `in_progress` feature, takes the next pending
+  batch of `tasks.md` (capped at 4, harness discipline), confirms with you, and
+  runs the implementer — with `read/write/edit/list` and an **allowlisted**
+  `run_command` — inside an isolated **git worktree** (`.buildwright/`, locally
+  excluded). When it finishes it verifies on disk: checkbox states re-read and
+  `git status --porcelain` diffed. It never merges and never flips feature
+  status: review with `git -C <worktree> diff`.
+- Command allowlist defaults are built in; extend or retime via an optional
+  project-owned `harness/runtime.yaml`:
+
+```yaml
+extra_allowed_commands:
+  - terraform plan
+command_timeout_s: 300
+```
+
+The unattended multi-phase design lives in
 `docs/specs/2026-10-27-harness-runtime-design.md`.
 
 ## Tests
