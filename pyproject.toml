@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "buildwright"
+version = "0.1.0"
+description = "Per-agent model routing for AI agents: LangGraph orchestration, PydanticAI agents, LiteLLM-ready registry, Langfuse tracing"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Jordi Marçal Poy" }]
+requires-python = ">=3.11"
+keywords = [
+    "llm",
+    "agents",
+    "model-routing",
+    "langgraph",
+    "pydantic-ai",
+    "litellm",
+    "langfuse",
+    "spec-driven-development",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "pydantic-ai-slim[openai]>=1.0",
+    "langgraph>=1.0",
+    "langfuse>=3.0",
+    "pydantic-settings>=2.4",
+    "PyYAML>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/jordimarsal/buildwright"
+Repository = "https://github.com/jordimarsal/buildwright"
+Issues = "https://github.com/jordimarsal/buildwright/issues"
+
+[project.scripts]
+buildwright = "buildwright.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-PyYAML>=6.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/buildwright"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]

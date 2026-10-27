@@ -1,0 +1,45 @@
+# Model registry: locals i remots en un sol lloc.
+# Els agents no trien model pel seu compte: el rol -> id es defineix a config (BW_ROLE_* o runtime.yaml del projecte)
+models:
+  # ---------------- locals ----------------
+  - id: local/qwen3
+    label: Qwen3 8B (Ollama)
+    kind: local
+    base_url: http://localhost:11434/v1
+    model: qwen3:8b
+
+  - id: local/llamacpp
+    label: llama.cpp server (GGUF)
+    kind: local
+    base_url: http://localhost:8080/v1
+    model: local-model
+
+  # ---------------- remots ----------------
+  - id: remote/gpt-4o-mini
+    label: GPT-4o mini
+    kind: remote
+    base_url: https://api.openai.com/v1
+    model: gpt-4o-mini
+    api_key_env: OPENAI_API_KEY
+
+  - id: remote/gpt-4o
+    label: GPT-4o
+    kind: remote
+    base_url: https://api.openai.com/v1
+    model: gpt-4o
+    api_key_env: OPENAI_API_KEY
+
+  - id: remote/claude-sonnet
+    label: Claude Sonnet 4.5
+    kind: remote
+    base_url: https://api.anthropic.com/v1
+    model: claude-sonnet-4-5
+    api_key_env: ANTHROPIC_API_KEY
+
+  # --------- via LiteLLM proxy (opcional, docker-compose) ---------
+  - id: litellm/gpt-4o-mini
+    label: GPT-4o mini via LiteLLM
+    kind: remote
+    base_url: http://localhost:4000/v1
+    model: gpt-4o-mini
+    api_key_env: LITELLM_API_KEY
