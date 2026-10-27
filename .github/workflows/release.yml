@@ -12,7 +12,7 @@ jobs:
       # Trusted publishing: cap token d'API; PyPI valida el workflow + repo + tag
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
       - run: uv build
       - uses: pypa/gh-action-pypi-publish@release/v1
