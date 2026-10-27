@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from .agents import Wright
 from .config import ROLES, Settings
 from .graph import build_graph
+from .harness import HarnessProject, format_status
 from .observability import get_tracer
 from .registry import ModelRegistry
 
@@ -53,6 +55,12 @@ def cmd_ask(settings: Settings, task: str) -> None:
     print(f"  {review.comments}")
 
 
+def cmd_harness_status(settings: Settings, path: str | None) -> None:
+    project = HarnessProject.detect(Path(path) if path else None)
+    registry = ModelRegistry.load(settings.models_file)
+    print(format_status(project, settings, registry))
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="buildwright",
@@ -64,6 +72,17 @@ def main(argv: list[str] | None = None) -> None:
     ask = sub.add_parser("ask", help="run the plan -> execute -> review pipeline")
     ask.add_argument("task")
 
+    harness = sub.add_parser(
+        "harness", help="inspect a harness-initialized project (read-only)"
+    )
+    harness_sub = harness.add_subparsers(dest="hcmd", required=True)
+    status = harness_sub.add_parser(
+        "status", help="feature board + planned role -> model routing"
+    )
+    status.add_argument(
+        "path", nargs="?", default=None, help="project root (default: cwd)"
+    )
+
     args = parser.parse_args(argv)
     settings = Settings()
 
@@ -72,9 +91,11 @@ def main(argv: list[str] | None = None) -> None:
             cmd_models(settings)
         elif args.cmd == "roles":
             cmd_roles(settings)
+        elif args.cmd == "harness":
+            cmd_harness_status(settings, args.path)
         else:
             cmd_ask(settings, args.task)
-    except (KeyError, RuntimeError) as exc:
+    except (KeyError, RuntimeError, FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
 

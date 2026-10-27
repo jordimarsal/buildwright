@@ -76,6 +76,20 @@ Trusted publishing — no API tokens:
 3. `git tag v0.1.0 && git push --tags` → the workflow runs `uv build` and
    publishes.
 
+## Harness runtime (phase 0)
+
+In a project initialized with [harness-standard](https://github.com/jordimarsal/harness):
+
+```bash
+buildwright harness status          # feature board + planned role -> model routing
+buildwright harness status ~/src/kafka-adapter-telemetry
+```
+
+Read-only: parses and schema-validates `harness/feature_list.json` (protocol v1),
+shows the board and which model each role would use. Phases 1+ (unattended
+implement→verify→review in a worktree) are designed in
+`docs/specs/2026-10-27-harness-runtime-design.md`.
+
 ## Tests
 
 ```bash
