@@ -3,16 +3,16 @@ from __future__ import annotations
 import argparse
 import sys
 
-from .agents import buildwright
+from .agents import Wright
 from .config import ROLES, Settings
 from .graph import build_graph
 from .observability import get_tracer
 from .registry import ModelRegistry
 
 
-def _board(settings: Settings) -> buildwright:
+def _wright(settings: Settings) -> Wright:
     registry = ModelRegistry.load(settings.models_file)
-    return buildwright(settings=settings, registry=registry)
+    return Wright(settings=settings, registry=registry)
 
 
 def cmd_models(settings: Settings) -> None:
@@ -25,8 +25,8 @@ def cmd_models(settings: Settings) -> None:
 
 
 def cmd_roles(settings: Settings) -> None:
-    ModelRegistry.load(settings.models_file)  # valida el fitxer
-    print("\nrol          model-id                model wire")
+    ModelRegistry.load(settings.models_file)  # validates the file
+    print("\nrole         model-id                model wire")
     registry = ModelRegistry.load(settings.models_file)
     for role in ROLES:
         model_id = settings.role_model(role)
@@ -35,7 +35,7 @@ def cmd_roles(settings: Settings) -> None:
 
 
 def cmd_ask(settings: Settings, task: str) -> None:
-    board = _board(settings)
+    board = _wright(settings)
     graph = build_graph(board)
     tracer = get_tracer(settings)
 
@@ -56,12 +56,12 @@ def cmd_ask(settings: Settings, task: str) -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="buildwright",
-        description="Per-agent model routing: un model per rol, locals i remots al mateix registry.",
+        description="Per-agent model routing: one model per role, local and remote in the same registry.",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("models", help="llista els models del registry")
-    sub.add_parser("roles", help="mostra el mapping rol -> model")
-    ask = sub.add_parser("ask", help="executa el pipeline plan -> execute -> review")
+    sub.add_parser("models", help="list the models in the registry")
+    sub.add_parser("roles", help="show the role -> model mapping")
+    ask = sub.add_parser("ask", help="run the plan -> execute -> review pipeline")
     ask.add_argument("task")
 
     args = parser.parse_args(argv)

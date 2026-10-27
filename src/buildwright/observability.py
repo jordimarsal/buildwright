@@ -7,7 +7,7 @@ from .config import Settings
 
 
 class NullTracer:
-    """No-op: quan no hi ha claus Langfuse, zero soroll i zero dependència activa."""
+    """No-op: when Langfuse keys are absent — zero noise, zero active dependency."""
 
     @contextmanager
     def span(self, name: str, **meta: object) -> Iterator[None]:
@@ -16,7 +16,7 @@ class NullTracer:
 
 class LangfuseTracer:
     def __init__(self, settings: Settings) -> None:
-        from langfuse import Langfuse  # import diferit: només si es fa servir
+        from langfuse import Langfuse  # deferred import: only when actually used
 
         self._client = Langfuse(
             public_key=settings.langfuse_public_key,
@@ -36,6 +36,6 @@ def get_tracer(settings: Settings) -> NullTracer | LangfuseTracer:
     if settings.langfuse_public_key and settings.langfuse_secret_key:
         try:
             return LangfuseTracer(settings)
-        except Exception:  # noqa: BLE001 - observabilitat mai no pot trencar una execució
+        except Exception:  # noqa: BLE001 - observability must never break a run
             return NullTracer()
     return NullTracer()

@@ -4,10 +4,11 @@ from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from .agents import Plan, Review, buildwright
+from .agents import Plan, Review, Wright
 
-# Cada node és UN agent PydanticAI; el model el decideix el rol (Settings), no el node.
-# Així muntar un CRAG o canviar el flux no toca ni una línia de codi de models.
+# Each node is ONE PydanticAI agent; the model is decided by the role
+# (Settings), never by the node. Assembling a CRAG or changing the flow
+# therefore touches zero lines of model code.
 
 
 class PipelineState(TypedDict, total=False):
@@ -18,7 +19,7 @@ class PipelineState(TypedDict, total=False):
     review: Review
 
 
-def build_graph(board: buildwright):
+def build_graph(board: Wright):
     planner = board.planner()
     worker = board.worker()
     reviewer = board.reviewer()
@@ -39,9 +40,9 @@ def build_graph(board: buildwright):
         return {"review": r.output}
 
     g = StateGraph(PipelineState)
-    g.add_node("plan", plan)      # model barat/local
-    g.add_node("execute", execute)  # model potent/remot
-    g.add_node("review", review)  # model barat/local
+    g.add_node("plan", plan)  # cheap/local model
+    g.add_node("execute", execute)  # strong/remote model
+    g.add_node("review", review)  # cheap/local model
     g.add_edge(START, "plan")
     g.add_edge("plan", "execute")
     g.add_edge("execute", "review")

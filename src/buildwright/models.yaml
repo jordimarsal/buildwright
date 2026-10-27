@@ -1,7 +1,8 @@
-# Model registry: locals i remots en un sol lloc.
-# Els agents no trien model pel seu compte: el rol -> id es defineix a config (BW_ROLE_* o runtime.yaml del projecte)
+# Model registry: local and remote models in one place.
+# Agents never pick a model themselves: role -> id is defined in config
+# (BW_ROLE_* or the project's runtime.yaml)
 models:
-  # ---------------- locals ----------------
+  # ---------------- local ----------------
   - id: local/qwen3
     label: Qwen3 8B (Ollama)
     kind: local
@@ -14,7 +15,7 @@ models:
     base_url: http://localhost:8080/v1
     model: local-model
 
-  # ---------------- remots ----------------
+  # ---------------- remote ----------------
   - id: remote/gpt-4o-mini
     label: GPT-4o mini
     kind: remote
@@ -36,7 +37,7 @@ models:
     model: claude-sonnet-4-5
     api_key_env: ANTHROPIC_API_KEY
 
-  # --------- via LiteLLM proxy (opcional, docker-compose) ---------
+  # --------- via LiteLLM proxy (optional, docker-compose) ---------
   - id: litellm/gpt-4o-mini
     label: GPT-4o mini via LiteLLM
     kind: remote

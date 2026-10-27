@@ -12,13 +12,13 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 
 class ModelSpec(BaseModel):
-    """Una entrada de models.yaml: un model accessible via endpoint OpenAI-compatible."""
+    """An entry of models.yaml: a model reachable via an OpenAI-compatible endpoint."""
 
     id: str
     label: str
     kind: Literal["local", "remote"]
     base_url: str
-    model: str | None = None  # nom "wire"; per defecte, l'id sense el prefix
+    model: str | None = None  # "wire" name; defaults to the id without the prefix
     api_key_env: str | None = None
     context_window: int | None = None
 
@@ -44,9 +44,9 @@ class ModelRegistry:
         return [s for s in self._specs.values() if kind is None or s.kind == kind]
 
     def build(self, model_id: str) -> Model:
-        """Construeix el model PydanticAI apuntant al seu endpoint. Sense xarxa."""
+        """Build the PydanticAI model pointing at its endpoint. No network involved."""
         s = self.spec(model_id)
-        api_key = "local"  # ollama/llama.cpp l'ignoren; el client exigeix no-buit
+        api_key = "local"  # ollama/llama.cpp ignore it; the client requires non-empty
         if s.api_key_env:
             api_key = os.environ.get(s.api_key_env, "")
             if not api_key:

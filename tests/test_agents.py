@@ -1,11 +1,11 @@
-from buildwright.agents import Plan, Review, buildwright
+from buildwright.agents import Plan, Review, Wright
 from buildwright.config import Settings
 from buildwright.registry import ModelRegistry
 
 
-def make_board() -> buildwright:
-    # sense registry: la factory fa de "model" i no toca xarxa
-    return buildwright(settings=Settings(models_file="/dev/null"))
+def make_board() -> Wright:
+    # no registry: the factory doubles as the model source; zero network
+    return Wright(settings=Settings(models_file="/dev/null"))
 
 
 def test_unknown_role_rejected():
@@ -25,10 +25,10 @@ def test_role_mapping_from_settings():
         role_worker="remote/gpt-4o",
         role_reviewer="local/llamacpp",
     )
-    board = buildwright(settings=settings)
+    board = Wright(settings=settings)
     assert settings.role_model("planner") == "local/llamacpp"
     assert settings.role_model("worker") == "remote/gpt-4o"
-    assert board.registry is None  # construït per defecte sense registry
+    assert board.registry is None  # constructed by default without a registry
 
 
 def test_registry_load_roundtrip(tmp_path):

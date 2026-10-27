@@ -11,7 +11,7 @@ ROLES = ("planner", "worker", "reviewer")
 
 
 def default_models_file() -> Path:
-    """Resolució del registry: ./models.yaml del projecte > models.yaml del paquet."""
+    """Registry resolution: project-local ./models.yaml > the bundled models.yaml."""
     local = Path("models.yaml")
     if local.is_file():
         return local
@@ -19,7 +19,7 @@ def default_models_file() -> Path:
 
 
 class Settings(BaseSettings):
-    """Configuració central. El mapping rol->model és la 'buildwright' pròpiament dita."""
+    """Central configuration. The role->model mapping is the switchboard itself."""
 
     model_config = SettingsConfigDict(
         env_prefix="BW_",
@@ -30,12 +30,12 @@ class Settings(BaseSettings):
 
     models_file: Path = Field(default_factory=default_models_file)
 
-    # rol -> id del registry (models.yaml)
+    # role -> registry id (models.yaml)
     role_planner: str = "local/qwen3"
     role_worker: str = "remote/gpt-4o-mini"
     role_reviewer: str = "local/qwen3"
 
-    # Langfuse: sense claus -> tracing desactivat (NullTracer)
+    # Langfuse: no keys -> tracing disabled (NullTracer)
     langfuse_public_key: str | None = None
     langfuse_secret_key: str | None = None
     langfuse_host: str = "http://localhost:3000"

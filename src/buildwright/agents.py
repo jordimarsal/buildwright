@@ -13,27 +13,28 @@ from .registry import ModelRegistry
 
 
 class Plan(BaseModel):
-    """Sortida estructurada del planner."""
+    """Structured output of the planner agent."""
 
     steps: list[str] = Field(min_length=1, max_length=5)
     needs_strong_model: bool = Field(
-        default=False, description="true només si la feina demana el model remot potent"
+        default=False,
+        description="true only when the task needs the strong remote model",
     )
 
 
 class Review(BaseModel):
-    """Sortida estructurada del reviewer."""
+    """Structured output of the reviewer agent."""
 
     verdict: Literal["pass", "fail"]
     comments: str
 
 
-ModelFactory = Callable[[str], Model]  # role -> Model (per tests: TestModel)
+ModelFactory = Callable[[str], Model]  # role -> Model (tests use TestModel)
 
 
 @dataclass
-class buildwright:
-    """Fàbrica d'agents: cada rol amb el model que li toca segons Settings."""
+class Wright:
+    """Agent factory: each role wired to the model assigned to it in Settings."""
 
     settings: Settings
     registry: ModelRegistry | None = None

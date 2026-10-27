@@ -1,6 +1,6 @@
-# Stack opcional: LiteLLM (gateway) + Langfuse (traces) + Ollama (models locals).
-# L'app funciona sense això (models directes a .env); això és per quan vols
-# fallbacks, pressupostos i traces de producció.
+# Optional stack: LiteLLM (gateway) + Langfuse (traces) + Ollama (local models).
+# The app works without it (direct models via .env); this is for when you want
+# fallbacks, budgets and production traces.
 services:
   litellm:
     image: ghcr.io/berriai/litellm:main-stable

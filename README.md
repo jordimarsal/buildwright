@@ -1,90 +1,92 @@
 # buildwright
 
-*The craftsman who builds per the spec* — un model per agent: els passos mecànics
-van al model **local** (barat, ràpid), les decisions importants al **remot**
-(potent). El mapping rol→model és configuració, no codi — canviar de model no
-toca ni una línia de pipeline.
+*The craftsman who builds per the spec* — one model per agent: mechanical steps
+go to the **local** model (cheap, fast), important decisions to the **remote**
+one (strong). The role→model mapping is configuration, not code — switching
+models touches zero lines of pipeline.
 
 ## Install
 
 ```bash
-uv tool install buildwright      # quan sigui publicat a PyPI
-# o en dev:
+uv tool install buildwright      # once published to PyPI
+# or for development:
 uv sync
 ```
 
+## Division of roles (one tool, one job)
 
-## Repartiment de rols (una eina, una feina)
-
-| Peça | Rol | On viu |
+| Piece | Role | Where it lives |
 |---|---|---|
-| **LangGraph** | l'ORDRE dels passos (gra, estat, retries) | `graph.py` |
-| **PydanticAI** | CADA PASSA (agent amb sortida estructurada) | `agents.py` |
-| **LiteLLM** | QUI serveix el model (proxy opcional, fallbacks) | `litellm/config.yaml` |
-| **Langfuse** | SI HA FUNCIONAT (traces, scores) | `observability.py` |
+| **LangGraph** | the ORDER of the steps (graph, state, retries) | `graph.py` |
+| **PydanticAI** | EACH STEP (agent with structured output) | `agents.py` |
+| **LiteLLM** | WHO serves the model (optional proxy, fallbacks) | `litellm/config.yaml` |
+| **Langfuse** | WHETHER IT WORKED (traces, scores) | `observability.py` |
 
-## El pipeline
+## The pipeline
 
 ```
-START → plan (local)  →  execute (remot)  →  review (local)  →  END
-        Plan struct.      resposta final      Review struct.
+START → plan (local)  →  execute (remote)  →  review (local)  →  END
+        Plan struct.      final answer        Review struct.
 ```
 
-Cada node és un agent PydanticAI; el model el decideix el **rol** a `Settings`
-(`BW_ROLE_*`), resolt contra el registry de `models.yaml`.
+Each node is a PydanticAI agent; the model is decided by the **role** in
+`Settings` (`BW_ROLE_*`), resolved against the `models.yaml` registry.
 
 ## Quickstart
 
 ```bash
 uv sync
-cp .env.example .env          # ajusta els BW_ROLE_* i claus
+cp .env.example .env          # adjust BW_ROLE_* and keys
 
-uv run buildwright models     # llista locals i remots
-uv run buildwright roles      # mapping rol -> model
-uv run buildwright ask "escriu un snake en python amb pygame"
+uv run buildwright models     # list local and remote models
+uv run buildwright roles      # role -> model mapping
+uv run buildwright ask "write a snake game in python with pygame"
 ```
 
-Sense endpoints disponibles, `ask` fallarà amb el model i env var concrets que falten.
+With no endpoints available, `ask` fails naming the exact model and the missing
+env var.
 
-## Models locals i remots
+## Local and remote models
 
-Tot el registry parla **OpenAI-compatible** (`models.yaml`):
+The whole registry speaks **OpenAI-compatible** (`models.yaml`):
 
-- **local/qwen3** → Ollama a `localhost:11434/v1`
-- **local/llamacpp** → `llama-server` a `localhost:8080/v1` (el teu GGUF)
-- **remote/gpt-4o-mini, gpt-4o** → OpenAI (clau via `OPENAI_API_KEY`)
-- **remote/claude-sonnet** → capa compat OpenAI d'Anthropic
-- **litellm/*** → via proxy LiteLLM (veure `docker-compose.yml`)
+- **local/qwen3** → Ollama at `localhost:11434/v1`
+- **local/llamacpp** → `llama-server` at `localhost:8080/v1` (your GGUF)
+- **remote/gpt-4o-mini, gpt-4o** → OpenAI (key via `OPENAI_API_KEY`)
+- **remote/claude-sonnet** → Anthropic's OpenAI-compat layer
+- **litellm/*** → via the LiteLLM proxy (see `docker-compose.yml`)
 
-Resolució del registry: `BW_MODELS_FILE` > `./models.yaml` del projecte > el
-`models.yaml` inclòs al paquet. Afegir un model = afegir 5 línies. Reassignar-lo
-a un agent = canviar un `BW_ROLE_*` a `.env`.
+Registry resolution: `BW_MODELS_FILE` > project-local `./models.yaml` > the
+`models.yaml` bundled with the package. Adding a model = adding 5 lines.
+Reassigning one to an agent = changing a `BW_ROLE_*` in `.env`.
 
-## Stack complet opcional (LiteLLM + Langfuse + Ollama)
+## Optional full stack (LiteLLM + Langfuse + Ollama)
 
-Amb Docker, `docker compose up -d` aixeca LiteLLM (routing/fallbacks), Langfuse
-(traces) i Ollama. Les claus de Langfuse surten a la web d'admin; copia-les a
-`.env` i el tracing s'activa sol (sense claus, el tracer és un no-op).
+With Docker, `docker compose up -d` brings up LiteLLM (routing/fallbacks),
+Langfuse (traces) and Ollama. Langfuse keys show up in its admin UI; copy them
+to `.env` and tracing turns itself on (without keys, the tracer is a no-op).
 
-## Publicar a PyPI
+## Publishing to PyPI
 
-Trusted publishing — cap token d'API:
+Trusted publishing — no API tokens:
 
-1. Crea `github.com/jordimarsal/buildwright` i fes push de `main`.
-2. A pypi.org: *Add a pending publisher* → owner `jordimarsal`, repo
+1. Create `github.com/jordimarsal/buildwright` and push `main`.
+2. On pypi.org: *Add a pending publisher* → owner `jordimarsal`, repo
    `buildwright`, workflow `release.yml`, environment `pypi`.
-3. `git tag v0.1.0 && git push --tags` → el workflow fa `uv build` i publica.
+3. `git tag v0.1.0 && git push --tags` → the workflow runs `uv build` and
+   publishes.
 
 ## Tests
 
 ```bash
-uv run pytest        # offline: TestModel de pydantic-ai, cap xarxa
+uv run pytest        # offline: pydantic-ai's TestModel, zero network
 ```
 
-## Regles anti-nyap
+## Anti-mess rules
 
-1. Tot parla OpenAI-protocol; PydanticAI mai importa litellm.
-2. Un agent = un node = una feina. Sense agents dins d'agents.
-3. Tracing registrat un sol cop (`observability.py`); mai escampat.
-4. Evals offline a CI manden; Langfuse és monitoratge de producció.
-5. Cada peça entra quan té trigger real (fallbacks→LiteLLM, flux no lineal→ja hi és LangGraph).
+1. Everything speaks OpenAI protocol; PydanticAI never imports litellm.
+2. One agent = one node = one job. No agents inside agents.
+3. Tracing registered exactly once (`observability.py`); never scattered.
+4. Offline evals in CI rule; Langfuse is production monitoring.
+5. Each piece joins when it has a real trigger (fallbacks→LiteLLM,
+   non-linear flow→LangGraph is already in).

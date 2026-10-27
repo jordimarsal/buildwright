@@ -1,12 +1,12 @@
 from pydantic_ai.models.test import TestModel
 
-from buildwright.agents import buildwright
+from buildwright.agents import Wright
 from buildwright.config import Settings
 from buildwright.graph import build_graph
 
 
-def make_board() -> buildwright:
-    return buildwright(
+def make_board() -> Wright:
+    return Wright(
         settings=Settings(models_file="/dev/null"),
         model_factory=lambda role: TestModel(),
     )
