@@ -54,6 +54,9 @@ The whole registry speaks **OpenAI-compatible** (`models.yaml`):
 - **local/llamacpp** → `llama-server` at `localhost:8080/v1` (your GGUF)
 - **remote/gpt-4o-mini, gpt-4o** → OpenAI (key via `OPENAI_API_KEY`)
 - **remote/claude-sonnet** → Anthropic's OpenAI-compat layer
+- **remote/zai-glm-flash** → Z.ai / Zhipu GLM (key via `ZAI_API_KEY`) — small and
+  cheap; a *coding plan* key needs the `/api/coding/paas/v4` base_url, otherwise
+  inference fails with error 1113 while `/models` still lists fine
 - **litellm/*** → via the LiteLLM proxy (see `docker-compose.yml`)
 
 Registry resolution: `BW_MODELS_FILE` > project-local `./models.yaml` > the

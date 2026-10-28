@@ -1,3 +1,6 @@
+from importlib import resources
+from pathlib import Path
+
 import pytest
 
 from buildwright.config import resolve_env
@@ -74,3 +77,10 @@ def test_process_env_wins_over_dotenv(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_MODEL_KEY", "sk-process")
     assert resolve_env("TEST_MODEL_KEY") == "sk-process"
     assert resolve_env("MISSING_KEY") == ""
+
+
+def test_bundled_registry_parses():
+    """The registry shipped inside the wheel must stay valid YAML."""
+    path = Path(str(resources.files("buildwright").joinpath("models.yaml")))
+    ids = {s.id for s in ModelRegistry.load(path).list()}
+    assert {"local/qwen3", "remote/gpt-4o-mini", "remote/zai-glm-flash"} <= ids

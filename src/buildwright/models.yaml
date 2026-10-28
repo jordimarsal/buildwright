@@ -37,6 +37,16 @@ models:
     model: claude-sonnet-4-5
     api_key_env: ANTHROPIC_API_KEY
 
+  # --------- Z.ai / Zhipu (GLM) — small and cheap; coding-plan keys go to ---------
+  # the /api/coding/paas/v4 base_url instead, or inference fails with error 1113
+  # ("insufficient balance") even though /models lists fine.
+  - id: remote/zai-glm-flash
+    label: GLM-5.3-flash (Z.ai)
+    kind: remote
+    base_url: https://api.z.ai/api/paas/v4
+    model: glm-5.3-flash
+    api_key_env: ZAI_API_KEY
+
   # --------- via LiteLLM proxy (optional, docker-compose) ---------
   - id: litellm/gpt-4o-mini
     label: GPT-4o mini via LiteLLM

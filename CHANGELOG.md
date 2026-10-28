@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-28
+
+### Added
+
+- `remote/zai-glm-flash` in the bundled registry — Z.ai / Zhipu GLM (key via
+  `ZAI_API_KEY`), small and cheap. The entry documents the two endpoints: a
+  *coding plan* key needs `…/api/coding/paas/v4`, otherwise inference fails
+  with error 1113 ("insufficient balance") even though `/models` lists fine.
+  A test now guards the `models.yaml` shipped inside the wheel.
+
 ## [0.4.1] - 2026-10-28
 
 ### Fixed
@@ -102,7 +112,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional Langfuse tracing (no keys → tracing disabled).
 - PyPI packaging with trusted publishing, CI and release workflows.
 
-[Unreleased]: https://github.com/jordimarsal/buildwright/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/jordimarsal/buildwright/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/jordimarsal/buildwright/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/jordimarsal/buildwright/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jordimarsal/buildwright/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jordimarsal/buildwright/compare/v0.2.0...v0.3.0
