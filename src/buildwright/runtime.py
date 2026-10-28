@@ -42,6 +42,11 @@ DEFAULT_ALLOWED_COMMANDS: tuple[str, ...] = (
     "bash harness/init.sh",
     "sh harness/init.sh",
     "harness/init.sh",
+    "bash harness/tools/audit-security.sh",
+    "sh harness/tools/audit-security.sh",
+    "bash harness/tools/bench.sh",
+    "sh harness/tools/bench.sh",
+    "python3",
     "git status",
     "git diff",
     "git log",
@@ -65,6 +70,10 @@ editing harness/specs/<feature>/tasks.md, changing `- [ ] T<n>` to `- [x] T<n>`.
 Use only relative paths inside the worktree. If a task cannot be completed \
 without deviating from the spec, do not improvise: stop and report \
 `blocked <task>: <reason>`.
+
+Anti-telephone-cord: record what you did (files created, gates run) in \
+`harness/progress/impl_<feature>.md` — one short section per dispatch. The \
+reviewer reads that file, not your chat.
 
 Final response: exactly one line — `done <T-ids> -> <main files>` or \
 `blocked <task>: <reason>`."""

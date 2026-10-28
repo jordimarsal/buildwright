@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-27
+
+### Added
+
+- `buildwright harness run` is now **the full feature loop** (phase 2): the
+  implementer runs batch after batch with stall recovery, the protocol's own
+  scripts become hard gates, the reviewer issues a structured verdict, and a
+  human gate parks the run — resumed with `approve` / `reject`, surviving
+  process restarts.
+- `buildwright harness approve` / `buildwright harness reject` — resume a parked
+  human gate. `approve` merges the feature branch to main, writes
+  `harness/specs/<name>/APPROVAL`, flips status to `done`, and appends the
+  machine-generated `retro:` line to `history.md`; `reject` turns the feature
+  back to the implementer with your comments.
+- On-disk stall detection via a **content-aware worktree fingerprint**
+  (porcelain + diff + untracked-file hashes): nothing written = re-dispatch the
+  same batch with `Nothing was written: …`; two stalls start a fresh agent
+  session; a batch with no progress across 4 dispatches is parked.
+- Hard gates as graph nodes: `init.sh` (must end `[OK]`), `check-traceability.py`,
+  and `audit-security.sh` / `bench.sh` (standard/strict). A failing gate feeds
+  its log back to the implementer; 3 consecutive failures park the feature.
+- Structured reviewer verdict (`APPROVED` / `CHANGES_REQUESTED`) written to
+  `harness/progress/review_<name>.md`; two rejections in a row park.
+- Sqlite checkpointer (`.buildwright/checkpoints.sqlite`, thread_id = feature
+  name) so human gates survive restarts.
+- Project-owned loop caps in `harness/runtime.yaml` (D1): `max_batch_attempts`,
+  `max_gate_cycles`, `max_review_rounds`.
+
 ## [0.3.0] - 2026-10-27
 
 ### Added
@@ -55,7 +83,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional Langfuse tracing (no keys → tracing disabled).
 - PyPI packaging with trusted publishing, CI and release workflows.
 
-[Unreleased]: https://github.com/jordimarsal/buildwright/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jordimarsal/buildwright/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jordimarsal/buildwright/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jordimarsal/buildwright/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jordimarsal/buildwright/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jordimarsal/buildwright/releases/tag/v0.1.0

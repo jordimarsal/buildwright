@@ -2,22 +2,29 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
+
+from langgraph.types import Command, RunnableConfig
 
 from .agents import Wright
 from .config import ROLES, Settings
 from .graph import build_graph
-from .harness import HarnessProject, format_status
+from .harness import Feature, HarnessProject, format_status
+from .loop import (
+    LoopContext,
+    LoopState,
+    ReviewVerdict,
+    build_loop_graph,
+    loop_session,
+    make_context,
+    pending_interrupt,
+    prepare_seed,
+    retro_line,
+)
 from .observability import get_tracer
 from .registry import ModelRegistry
-from .runtime import (
-    Sandbox,
-    build_implementer,
-    create_worktree,
-    next_batch,
-    parse_tasks,
-    verify_on_disk,
-)
 
 
 def _wright(settings: Settings) -> Wright:
@@ -69,80 +76,193 @@ def cmd_harness_status(settings: Settings, path: str | None) -> None:
     print(format_status(project, settings, registry))
 
 
-def cmd_harness_run(
-    settings: Settings, feature: str | None, max_tasks: int, path: str | None, yes: bool
-) -> None:
-    """Phase 1: one supervised implementer batch in a git worktree."""
-    project = HarnessProject.detect(Path(path) if path else None)
-    fl = project.feature_list
-
+def _select_feature(project: HarnessProject, feature: str | None) -> Feature:
+    features = project.feature_list.features
     if feature:
-        feat = next((f for f in fl.features if f.name == feature), None)
+        feat = next((f for f in features if f.name == feature), None)
         if feat is None:
             raise KeyError(f"feature '{feature}' not found in {project.root}")
     else:
         in_progress = project.by_status("in_progress")
         if not in_progress:
             raise RuntimeError(
-                "no feature is in_progress — approve a spec first "
-                "(phase 1 does not run the spec phase)"
+                "no feature is in_progress — the loop executes in_progress "
+                "features (the spec gate was approved interactively)"
             )
         feat = in_progress[0]
+    if feat.status == "blocked":
+        raise RuntimeError(
+            f"feature '{feat.name}' is blocked — resume it with "
+            "`buildwright harness approve` (or set it in_progress manually)"
+        )
     if feat.status != "in_progress":
         raise RuntimeError(
-            f"feature '{feat.name}' is '{feat.status}'; phase 1 only executes "
-            "in_progress features (with an approved spec)"
+            f"feature '{feat.name}' is '{feat.status}'; the loop only executes "
+            "in_progress features"
         )
+    return feat
 
-    tasks_path = project.root / "harness" / "specs" / feat.name / "tasks.md"
-    if not tasks_path.is_file():
-        raise FileNotFoundError(
-            f"missing {tasks_path} (spec = requirements.md + design.md + tasks.md)"
-        )
-    batch = next_batch(parse_tasks(tasks_path.read_text(encoding="utf-8")), max_tasks)
-    if not batch:
-        raise RuntimeError(f"feature '{feat.name}' has no pending tasks")
 
-    print(f"\nfeature   {feat.name} — {feat.title}")
-    print(f"batch     {', '.join(t.task_id for t in batch)}")
-    for t in batch:
-        print(f"  {t.task_id}: {t.text}")
-    print(f"implementer model  {settings.role_model('worker')}")
+def _confirm(ctx: LoopContext, seed: LoopState, yes: bool) -> None:
+    level = ctx.project.feature_list.project.audit_level
+    print(f"\nfeature       {ctx.feature.name} — {ctx.feature.title}")
+    print(
+        f"batch         {', '.join(str(b) for b in seed.get('batch', []))} "
+        f"(size <= {ctx.max_tasks}, budget {seed.get('run_limit')} batches)"
+    )
+    print(f"worktree      {ctx.worktree}")
+    print(f"implementer   {ctx.settings.role_model('worker')}")
+    print(f"reviewer      {ctx.settings.role_model('reviewer')}")
+    print(f"gates         init.sh · check-traceability.py · audit ({level})")
     if not yes and input("proceed? [y/N] ").strip().lower() != "y":
         print("aborted")
+        raise SystemExit(0)
+
+
+def cmd_harness_run(
+    settings: Settings,
+    feature: str | None,
+    max_tasks: int,
+    max_batches: int,
+    path: str | None,
+    yes: bool,
+    dispatch: Callable[[str], str] | None = None,
+    review: Callable[[str], ReviewVerdict] | None = None,
+) -> None:
+    """Phase 2: the full feature loop — batches, hard gates, human gates."""
+    project = HarnessProject.detect(Path(path) if path else None)
+    feat = _select_feature(project, feature)
+    ctx = make_context(
+        project,
+        settings,
+        feat.name,
+        max_tasks=max_tasks,
+        max_batches=max_batches,
+        dispatch=dispatch,
+        review=review,
+    )
+    tracer = get_tracer(settings)
+    with loop_session(project.root) as saver, tracer.span(
+        "buildwright.harness.loop", feature=feat.name
+    ):
+        graph = build_loop_graph(ctx, saver)
+        cfg: RunnableConfig = {"configurable": {"thread_id": feat.name}}
+        snap = graph.get_state(cfg)
+        if pending_interrupt(snap):
+            raise RuntimeError(
+                f"feature '{feat.name}' is parked at a human gate — resume with "
+                "`buildwright harness approve` or `buildwright harness reject`"
+            )
+        if snap.next:
+            print("resuming an interrupted run (previous invocation did not finish)")
+            out: dict[str, Any] = graph.invoke(None, cfg)
+        else:
+            seed = prepare_seed(ctx, dict(snap.values) if snap.values else None)
+            _confirm(ctx, seed, yes)
+            out = graph.invoke(seed, cfg)
+    _print_result(ctx, out)
+
+
+def cmd_harness_gate(
+    settings: Settings,
+    decision: str,
+    comments: str,
+    feature: str | None,
+    path: str | None,
+) -> None:
+    """Resume a parked human gate: approve continues, reject turns back."""
+    project = HarnessProject.detect(Path(path) if path else None)
+    worktrees = project.root / ".buildwright" / "worktrees"
+    candidates = [
+        f
+        for f in project.feature_list.features
+        if f.status in ("in_progress", "blocked")
+        and (worktrees / f.name).is_dir()
+        and (feature is None or f.name == feature)
+    ]
+    if not candidates:
+        raise RuntimeError(
+            "no feature with a buildwright worktree to resume"
+            + (f" (feature '{feature}')" if feature else "")
+        )
+    tracer = get_tracer(settings)
+    with loop_session(project.root) as saver, tracer.span(
+        "buildwright.harness.gate", decision=decision
+    ):
+        parked: list[tuple[LoopContext, Any]] = []
+        for feat in candidates:
+            ctx = make_context(project, settings, feat.name)
+            graph = build_loop_graph(ctx, saver)
+            snap = graph.get_state({"configurable": {"thread_id": feat.name}})
+            if pending_interrupt(snap):
+                parked.append((ctx, graph))
+        if not parked:
+            raise RuntimeError(f"no parked gate — nothing to {decision}")
+        if len(parked) > 1:
+            names = ", ".join(c.feature.name for c, _ in parked)
+            raise RuntimeError(f"multiple parked gates ({names}) — pass --feature")
+        ctx, graph = parked[0]
+        cfg: RunnableConfig = {"configurable": {"thread_id": ctx.feature.name}}
+        out: dict[str, Any] = graph.invoke(
+            Command(resume={"decision": decision, "comments": comments}), cfg
+        )
+    _print_result(ctx, out)
+
+
+def _print_stats(state: dict[str, Any]) -> None:
+    print(
+        f"  batches {state.get('batches_done', 0)} · "
+        f"dispatches {state.get('dispatches', 0)} · "
+        f"stalls {state.get('stalls_total', 0)} · "
+        f"restarts {state.get('restarts', 0)}"
+    )
+
+
+def _print_gate(ctx: LoopContext, payload: Any) -> None:
+    if not isinstance(payload, dict):
+        print(f"\n[parked] {ctx.feature.name}: {payload}")
         return
+    gate = payload.get("gate")
+    if gate == "completion":
+        summary = payload.get("summary", {})
+        print(f"\n[completion gate] {ctx.feature.name} — {ctx.feature.title}")
+        print(
+            f"  reviewer: {summary.get('verdict', '?')} · "
+            f"batches {summary.get('batches', 0)} · "
+            f"dispatches {summary.get('dispatches', 0)} · "
+            f"stalls {summary.get('stalls', 0)} · "
+            f"restarts {summary.get('restarts', 0)}"
+        )
+        print("  approve → buildwright harness approve [comments]")
+        print('  reject  → buildwright harness reject "what to change"')
+    elif gate == "parked":
+        print(f"\n[parked] {ctx.feature.name} is blocked")
+        print(f"  reason: {payload.get('reason', '?')}")
+        print("  approve → buildwright harness approve   (resumes the loop)")
+        print('  reject  → buildwright harness reject    (leaves it blocked)')
+    else:
+        print(f"\n[parked] unknown gate {gate!r}")
 
-    worktree = create_worktree(project.root, feat.name)
-    print(f"worktree  {worktree}")
 
-    sandbox = Sandbox.from_project(
-        worktree, log_dir=worktree / "harness" / "logs" / feat.name
-    )
-    registry = ModelRegistry.load(settings.models_file)
-    agent = build_implementer(registry.build(settings.role_model("worker")), sandbox)
-
-    prompt = (
-        f"Feature: {feat.name} — {feat.title}\n"
-        f"Spec: harness/specs/{feat.name}/ (requirements.md, design.md, tasks.md)\n"
-        f"Acceptance: {'; '.join(feat.acceptance)}\n"
-        "Your batch: "
-        + "; ".join(f"{t.task_id}: {t.text}" for t in batch)
-    )
-    result = agent.run_sync(prompt, deps=sandbox)
-    print(f"\n--- implementer ({settings.role_model('worker')}) ---")
-    print(result.output)
-
-    report = verify_on_disk(worktree, feat.name, batch)
-    print("\n--- verified on disk ---")
-    print(f"tasks marked   {', '.join(report.marked) or '-'}  "
-          f"({len(report.marked)}/{len(report.batch)})")
-    print(f"changed files  {len(report.changed_files)}")
-    for f in report.changed_files:
-        print(f"  {f}")
-    print(f"\nreview with: git -C {worktree} diff")
-    if len(report.marked) != len(report.batch):
-        print("result: INCOMPLETE — tasks claimed but not marked on disk", file=sys.stderr)
-        sys.exit(1)
+def _print_result(ctx: LoopContext, out: dict[str, Any]) -> None:
+    parked = out.get("__interrupt__")
+    state = {k: v for k, v in out.items() if k != "__interrupt__"}
+    log = state.get("log") or []
+    if log:
+        print("\n--- loop log ---")
+        for line in log:
+            print(f"  {line}")
+    if parked:
+        _print_gate(ctx, parked[0].value)
+    elif state.get("finalized"):
+        print(
+            f"\n[done] {ctx.feature.name} — merged to main, APPROVAL written, "
+            "status done"
+        )
+        print(f"  {retro_line(state)}")
+    else:
+        print("\n[stopped] run limit reached — re-run `buildwright harness run` to continue")
+        _print_stats(state)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -167,12 +287,31 @@ def main(argv: list[str] | None = None) -> None:
         "path", nargs="?", default=None, help="project root (default: cwd)"
     )
     run = harness_sub.add_parser(
-        "run", help="run ONE supervised implementer batch in a git worktree"
+        "run", help="run the feature loop: batches -> hard gates -> review -> human gate"
     )
     run.add_argument("--feature", default=None, help="feature name (default: first in_progress)")
     run.add_argument("--max-tasks", type=int, default=3, help="batch size cap (1-4)")
+    run.add_argument(
+        "--max-batches", type=int, default=10, help="batch budget for this invocation"
+    )
     run.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     run.add_argument("path", nargs="?", default=None, help="project root (default: cwd)")
+
+    approve = harness_sub.add_parser(
+        "approve", help="resume a parked human gate with approval"
+    )
+    approve.add_argument("comments", nargs="*", help="recorded in APPROVAL / passed on")
+    approve.add_argument("--feature", default=None, help="which parked feature (when several)")
+    approve.add_argument("--path", default=None, help="project root (default: cwd)")
+
+    reject = harness_sub.add_parser(
+        "reject", help="resume a parked human gate with changes requested"
+    )
+    reject.add_argument(
+        "comments", nargs="+", help="what to change (fed back to the implementer)"
+    )
+    reject.add_argument("--feature", default=None, help="which parked feature (when several)")
+    reject.add_argument("--path", default=None, help="project root (default: cwd)")
 
     args = parser.parse_args(argv)
     settings = Settings()
@@ -185,9 +324,30 @@ def main(argv: list[str] | None = None) -> None:
         elif args.cmd == "harness":
             if args.hcmd == "status":
                 cmd_harness_status(settings, args.path)
-            else:
+            elif args.hcmd == "run":
                 cmd_harness_run(
-                    settings, args.feature, args.max_tasks, args.path, args.yes
+                    settings,
+                    args.feature,
+                    args.max_tasks,
+                    args.max_batches,
+                    args.path,
+                    args.yes,
+                )
+            elif args.hcmd == "approve":
+                cmd_harness_gate(
+                    settings,
+                    "approve",
+                    " ".join(args.comments),
+                    args.feature,
+                    args.path,
+                )
+            else:
+                cmd_harness_gate(
+                    settings,
+                    "reject",
+                    " ".join(args.comments),
+                    args.feature,
+                    args.path,
                 )
         else:
             cmd_ask(settings, args.task)

@@ -82,26 +82,49 @@ In a project initialized with [harness](https://github.com/jordimarsal/harness):
 
 ```bash
 buildwright harness status                          # board + planned routing (read-only)
-buildwright harness run                             # ONE supervised implementer batch
+buildwright harness run                             # the FULL feature loop (see below)
 buildwright harness run --feature f3_dashboard      # specific feature
+buildwright harness approve "lgtm"                  # resume a parked gate: approve
+buildwright harness reject  "add tests for R1"      # resume a parked gate: reject
 ```
 
 - `status` parses and schema-validates `harness/feature_list.json` (protocol v1)
   and shows the board plus which model each role would use.
-- `run` (phase 1) picks the first `in_progress` feature, takes the next pending
-  batch of `tasks.md` (capped at 4, harness discipline), confirms with you, and
-  runs the implementer — with `read/write/edit/list` and an **allowlisted**
-  `run_command` — inside an isolated **git worktree** (`.buildwright/`, locally
-  excluded). When it finishes it verifies on disk: checkbox states re-read and
-  `git status --porcelain` diffed. It never merges and never flips feature
-  status: review with `git -C <worktree> diff`.
+- `run` is **the full feature loop** (phase 2) — the graph *is* the leader. One
+  feature runs batch after batch inside an isolated **git worktree**
+  (`.buildwright/`, locally excluded), each batch being the next pending slice of
+  `tasks.md` (capped at 4, harness discipline):
+
+  ```
+  implement_batch → verify → init_gate → advance_batch → reviewer
+                    → traceability_gate → audit_gate → completion_gate → finalize
+  ```
+
+  - **verify** re-reads `tasks.md` and diffs the worktree — a chat claim is not
+    evidence. Nothing written = a **stall**: the same batch is re-dispatched with
+    `Nothing was written: …`; two stalls in a row start a **fresh** agent
+    session; a batch that makes no progress across 4 dispatches is **parked**.
+  - **hard gates** run the scripts this protocol already has (`init.sh` must end
+    `[OK]`, `check-traceability.py`, and `audit-security.sh` / `bench.sh` for
+    standard/strict). A failing gate feeds its log back to the implementer and
+    loops back; 3 consecutive failures park the feature.
+  - the **reviewer** issues a structured `APPROVED` / `CHANGES_REQUESTED` verdict
+    written to `harness/progress/review_<name>.md`; two rejections in a row park.
+  - **completion_gate** is a human gate: the loop `interrupt()`s and parks, with
+    state persisted in a sqlite checkpointer (`.buildwright/checkpoints.sqlite`)
+    so it survives restarts. `approve` **merges to main**, writes
+    `harness/specs/<name>/APPROVAL`, flips status to `done`, and appends the
+    `retro:` line to `history.md`; `reject` turns the feature back to the
+    implementer with your comments.
 - Command allowlist defaults are built in; extend or retime via an optional
-  project-owned `harness/runtime.yaml`:
+  project-owned `harness/runtime.yaml` (also `max_batch_attempts`,
+  `max_gate_cycles`, `max_review_rounds`):
 
 ```yaml
 extra_allowed_commands:
   - terraform plan
 command_timeout_s: 300
+max_gate_cycles: 3
 ```
 
 The unattended multi-phase design lives in
