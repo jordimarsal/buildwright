@@ -1,3 +1,3 @@
 """Per-agent model routing: each agent with its own model, local or remote."""
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"

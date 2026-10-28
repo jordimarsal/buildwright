@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-28
+
 ### Fixed
 
 - A **reused feature worktree is now synced with `main`** before the next
@@ -100,7 +102,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional Langfuse tracing (no keys → tracing disabled).
 - PyPI packaging with trusted publishing, CI and release workflows.
 
-[Unreleased]: https://github.com/jordimarsal/buildwright/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jordimarsal/buildwright/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/jordimarsal/buildwright/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jordimarsal/buildwright/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jordimarsal/buildwright/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jordimarsal/buildwright/compare/v0.1.0...v0.2.0
