@@ -125,7 +125,8 @@ buildwright harness reject  "add tests for R1"      # resume a parked gate: reje
     so it survives restarts. `approve` **merges to main**, writes
     `harness/specs/<name>/APPROVAL`, flips status to `done`, and appends the
     `retro:` line to `history.md`; `reject` turns the feature back to the
-    implementer with your comments.
+    implementer with your comments. On approval the feature's worktree is
+    removed and its merged branch deleted — a re-run starts fresh off `main`.
 - Command allowlist defaults are built in; extend or retime via an optional
   project-owned `harness/runtime.yaml` (also `max_batch_attempts`,
   `max_gate_cycles`, `max_review_rounds`):

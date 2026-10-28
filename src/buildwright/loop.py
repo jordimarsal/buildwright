@@ -427,6 +427,25 @@ def _finalize(ctx: LoopContext, state: LoopState) -> list[str]:
             "commit the bookkeeping",
         )
         lines.append("bookkeeping committed to main")
+
+    # 8. cleanup: everything of value is committed (1) and merged (3), so the
+    #    worktree is disk residue and the branch a dangling ref. Best-effort —
+    #    the feature is already done; a failed cleanup must not fail the run.
+    removal = _git(root, "worktree", "remove", str(worktree))
+    if removal.returncode != 0:
+        # untracked gate logs / .venv leftovers block a clean removal; --force
+        # only discards what step 1 did not consider worth committing
+        _git(root, "worktree", "remove", "--force", str(worktree))
+    if worktree.exists():
+        lines.append(f"worktree kept: {worktree.relative_to(root)} (remove failed)")
+    else:
+        lines.append(f"worktree removed: {worktree.relative_to(root)}")
+        _git(root, "worktree", "prune")
+        branch = f"buildwright/{feat.name}"
+        if _git(root, "branch", "-d", branch).returncode == 0:
+            lines.append(f"branch deleted: {branch} (merged)")
+        else:
+            lines.append(f"branch kept: {branch}")
     return lines
 
 

@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.3] - 2026-10-28
 
 ### Fixed
 
@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   second pass, `check-traceability.py --feature <name>`. Harness standards
   whose script predates the `--feature` flag degrade to the `--all` pass
   (the flag is probed in the script text, since unknown arguments exit 2).
+
+### Changed
+
+- **`finalize` cleans up after itself.** Approving the completion gate now also
+  removes the feature worktree (`.buildwright/worktrees/<name>`) and deletes
+  the merged `buildwright/<name>` branch; previously every completed feature
+  left both behind. Best-effort: untracked leftovers (gate logs, `.venv`) are
+  force-discarded, but a failed cleanup only logs — it never fails a run whose
+  work is already merged. A later re-run of the feature starts from a fresh
+  worktree off `main`.
 
 ## [0.4.2] - 2026-10-28
 

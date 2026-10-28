@@ -204,16 +204,41 @@ def test_full_loop_approve_end_to_end(tmp_path: Path):
     assert payload["summary"]["verdict"] == "APPROVED"
     assert payload["summary"]["batches"] == 1
 
+    branch_sha = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "buildwright/f2_hub"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    # gate-log leftovers (untracked) are the norm in real runs: they must not
+    # keep the finalized worktree alive
+    logs = ctx.worktree / "harness" / "logs" / "f2_hub"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "gate_traceability.log").write_text("VERDICT: PASS\n", encoding="utf-8")
+
     out2 = resume(ctx, "approve", "ship it")
     assert isinstance(out2, dict) and out2["finalized"] is True
 
-    # the worktree landed on main
+    # the work landed on main
     assert (root / "src" / "impl_T1.py").is_file()
     assert subprocess.run(
-        ["git", "-C", str(root), "merge-base", "--is-ancestor", "buildwright/f2_hub", "main"],
+        ["git", "-C", str(root), "merge-base", "--is-ancestor", branch_sha, "main"],
         check=False,
         capture_output=True,
     ).returncode == 0
+    # finalize cleaned up: worktree and merged branch are gone, commits remain
+    assert not (root / ".buildwright" / "worktrees" / "f2_hub").exists()
+    assert (
+        subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", "refs/heads/buildwright/f2_hub"],
+            check=False,
+            capture_output=True,
+        ).returncode
+        != 0
+    )
+    assert any("worktree removed" in line for line in out2["log"])
+    assert any("branch deleted" in line for line in out2["log"])
     # APPROVAL only exists because the completion gate approved
     approval = (root / "harness" / "specs" / "f2_hub" / "APPROVAL").read_text()
     assert "ship it" in approval and "completion gate" in approval
