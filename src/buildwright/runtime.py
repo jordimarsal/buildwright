@@ -52,6 +52,8 @@ DEFAULT_ALLOWED_COMMANDS: tuple[str, ...] = (
     "harness/init.sh",
     "bash harness/tools/audit-security.sh",
     "sh harness/tools/audit-security.sh",
+    "bash harness/tools/gauntlet.sh",
+    "sh harness/tools/gauntlet.sh",
     "bash harness/tools/bench.sh",
     "sh harness/tools/bench.sh",
     "python3",

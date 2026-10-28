@@ -20,6 +20,7 @@ import hashlib
 import json
 import re
 import subprocess
+import threading
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -60,6 +61,10 @@ MAX_REVIEW_ROUNDS = 2  # CHANGES_REQUESTED in a row → park blocked
 MAX_STALLS = 2  # consecutive stalls → fresh agent instance (restart)
 MAX_SPEC_ROUNDS = 2  # spec-gate rejections in a row → park blocked
 
+# parallel mode: two features committing board flips to main at once would race
+# on git's index.lock — every main-repo mutation takes this lock
+MAIN_LOCK = threading.Lock()
+
 LOOP_CAP_KEYS = ("max_batch_attempts", "max_gate_cycles", "max_review_rounds", "max_spec_rounds")
 
 
@@ -80,6 +85,7 @@ class LoopState(TypedDict, total=False):
     review_rounds: int
     spec_rounds: int  # consecutive spec-gate rejections
     spec_approved: bool  # spec gate passed (skip re-authoring on resume)
+    gauntlet_rounds: int  # consecutive gauntlet rejections
     batches_done: int
     verdict: str
     park_reason: str
@@ -106,6 +112,15 @@ class ReviewVerdict(BaseModel):
     summary: str = ""
     traceability: list[str] = Field(default_factory=list)
     required_changes: list[str] = Field(default_factory=list)
+
+
+class GauntletVerdict(BaseModel):
+    """Structured G2+G3 verdict (G1/G4 are mechanical: the node runs them)."""
+
+    verdict: Literal["APPROVED", "REJECTED"]
+    g2_findings: list[str] = Field(default_factory=list)  # adversarial: fixed|defended
+    g3_notes: str = ""
+    summary: str = ""
 
 
 REVIEW_INSTRUCTIONS = """You are the reviewer agent of a harness-initialized project.
@@ -156,6 +171,7 @@ class LoopContext:
     dispatch: Callable[[str], str] | None = None
     review: Callable[[str], ReviewVerdict] | None = None
     spec: Callable[[str], str] | None = None
+    gauntlet: Callable[[str], GauntletVerdict] | None = None
 
     def run_dispatch(self, prompt: str) -> str:
         """One dispatch = one fresh agent instance (no shared session)."""
@@ -170,6 +186,10 @@ class LoopContext:
         fn = self.spec if self.spec is not None else _default_spec(self)
         return fn(prompt)
 
+    def run_gauntlet(self, prompt: str) -> GauntletVerdict:
+        fn = self.gauntlet if self.gauntlet is not None else _default_gauntlet(self)
+        return fn(prompt)
+
 
 def make_context(
     project: HarnessProject,
@@ -181,6 +201,7 @@ def make_context(
     dispatch: Callable[[str], str] | None = None,
     review: Callable[[str], ReviewVerdict] | None = None,
     spec: Callable[[str], str] | None = None,
+    gauntlet: Callable[[str], GauntletVerdict] | None = None,
 ) -> LoopContext:
     """Resolve the feature, (re)create its worktree and load runtime caps (D1)."""
     feat = next((f for f in project.feature_list.features if f.name == feature_name), None)
@@ -203,6 +224,7 @@ def make_context(
         dispatch=dispatch,
         review=review,
         spec=spec,
+        gauntlet=gauntlet,
     )
 
 
@@ -275,6 +297,53 @@ def _default_spec(ctx: LoopContext) -> Callable[[str], str]:
         return agent.run_sync(prompt, deps=ctx.sandbox).output
 
     return spec
+
+
+GAUNTLET_INSTRUCTIONS = """You are the gauntlet reviewer of a harness-initialized project
+(module: gauntlet). G1 (mechanical correctness) and G4 (evidence) are verified by the
+runtime — your passes are:
+
+- **G2 — Adversarial**: walk the diff with hostile eyes — malicious input, empty/null/
+  negative values, races, brittle tests (docs/iteration-protocol.md checklist). Every
+  finding is either FIXED by you (never: you cannot edit) or must be REJECTED with the
+  finding listed in g2_findings.
+- **G3 — Maintainability**: architecture.md and conventions.md respected, no blanket
+  `except`, I/O at the edges, no speculative abstraction. Note conclusions in g3_notes.
+
+Read docs/gauntlet-protocol.md first, then the diff (`git diff main` content via
+list_dir/read_file) and the spec trio. Hard rule: REJECT when any G2 finding is real
+and unfixed — do not negotiate with quality. APPROVED means you would bet production
+traffic on this diff."""
+
+
+def _default_gauntlet(ctx: LoopContext) -> Callable[[str], GauntletVerdict]:
+    def gauntlet(prompt: str) -> GauntletVerdict:
+        model = ctx.registry.build(ctx.settings.role_model("reviewer"))
+        agent: Agent[Sandbox, GauntletVerdict] = Agent(
+            model,
+            output_type=GauntletVerdict,
+            deps_type=Sandbox,
+            instructions=GAUNTLET_INSTRUCTIONS,
+        )
+
+        @agent.tool
+        def read_file(run_ctx: RunContext[Sandbox], path: str) -> str:
+            """Read a file from the worktree."""
+            return tool_read_file(run_ctx.deps, path)
+
+        @agent.tool
+        def list_dir(run_ctx: RunContext[Sandbox], path: str = ".") -> str:
+            """List a directory of the worktree."""
+            return tool_list_dir(run_ctx.deps, path)
+
+        @agent.tool
+        def run_command(run_ctx: RunContext[Sandbox], command: str) -> str:
+            """Run an allowlisted command (tests, gates) in the worktree."""
+            return tool_run_command(run_ctx.deps, command)
+
+        return agent.run_sync(prompt, deps=ctx.sandbox).output
+
+    return gauntlet
 
 
 def _default_review(ctx: LoopContext) -> Callable[[str], ReviewVerdict]:
@@ -395,16 +464,18 @@ def _commit_main_status(root: Path, feature_name: str, status: str) -> None:
     The runtime owns `feature_list.json`; a status flip is a protocol event, so
     it is committed immediately. This keeps `finalize`'s "main must be clean"
     gate honest — an uncommitted flip would otherwise block the merge forever.
+    Parallel mode serializes main-repo mutations through MAIN_LOCK.
     """
-    set_feature_status(root, feature_name, status)
-    if not _git(root, "status", "--porcelain").stdout.strip():
-        return  # nothing to commit (e.g. status already matched)
-    _run_or_raise(root, ["add", "-A"], "stage the status flip")
-    _run_or_raise(
-        root,
-        [*GIT_IDENTITY, "commit", "-m", f"chore({feature_name}): status {status}"],
-        "commit the status flip",
-    )
+    with MAIN_LOCK:
+        set_feature_status(root, feature_name, status)
+        if not _git(root, "status", "--porcelain").stdout.strip():
+            return  # nothing to commit (e.g. status already matched)
+        _run_or_raise(root, ["add", "-A"], "stage the status flip")
+        _run_or_raise(
+            root,
+            [*GIT_IDENTITY, "commit", "-m", f"chore({feature_name}): status {status}"],
+            "commit the status flip",
+        )
 
 
 def _finalize(ctx: LoopContext, state: LoopState) -> list[str]:
@@ -424,90 +495,92 @@ def _finalize(ctx: LoopContext, state: LoopState) -> list[str]:
         )
         lines.append(f"worktree committed: feat({feat.name}): {feat.title}")
 
-    # 2. main must be clean before the completion gate may merge
-    dirty = _git(root, "status", "--porcelain").stdout.strip()
-    if dirty:
-        raise FinalizeError(
-            "main has uncommitted changes — commit or stash them, then approve "
-            "again:\n" + dirty
-        )
+    # steps 2-8 mutate main: parallel mode serializes them through MAIN_LOCK
+    with MAIN_LOCK:
+        # 2. main must be clean before the completion gate may merge
+        dirty = _git(root, "status", "--porcelain").stdout.strip()
+        if dirty:
+            raise FinalizeError(
+                "main has uncommitted changes — commit or stash them, then approve "
+                "again:\n" + dirty
+            )
 
-    # 3. merge-or-discard is the completion gate's decision; approve = merge
-    merge = _git(
-        root,
-        *identity,
-        "merge",
-        f"buildwright/{feat.name}",
-    )
-    if merge.returncode != 0:
-        raise FinalizeError(
-            "merge into main failed — resolve it in the main worktree "
-            "(finish the merge or `git merge --abort`), then approve again:\n"
-            + (merge.stderr or merge.stdout).strip()
-        )
-    lines.append(f"merged buildwright/{feat.name} into main")
-
-    # 4. APPROVAL record — only after an explicit completion-gate approval (EARS)
-    approval = root / "harness" / "specs" / feat.name / "APPROVAL"
-    approval.parent.mkdir(parents=True, exist_ok=True)
-    approval.write_text(
-        f"# APPROVAL — {feat.name}\n\n"
-        f"- human: {_human()}\n"
-        f"- date: {date.today().isoformat()}\n"
-        f"- gate: completion gate (`buildwright harness approve`)\n"
-        f"- comments: {state.get('approval_comments', '') or '-'}\n",
-        encoding="utf-8",
-    )
-    lines.append(f"APPROVAL written: {approval.relative_to(root)}")
-
-    # 5. status done — unreachable without the APPROVAL written above
-    set_feature_status(root, feat.name, "done")
-    lines.append(f"status: {feat.name} → done")
-
-    # 6. history.md + retro line (append-only; marker keeps retries idempotent)
-    history = root / "harness" / "progress" / "history.md"
-    history.parent.mkdir(parents=True, exist_ok=True)
-    marker = f"### {feat.name} —"
-    existing = history.read_text(encoding="utf-8") if history.exists() else ""
-    if marker not in existing:
-        entry = (
-            f"\n{marker} {feat.title} ({date.today().isoformat()})\n\n"
-            f"- approved by {_human()} · reviewer: {state.get('verdict', 'APPROVED')} · "
-            f"batches: {state.get('batches_done', 0)}\n"
-            f"{retro_line(state)}\n"
-        )
-        with history.open("a", encoding="utf-8") as fh:
-            fh.write(entry)
-        lines.append(f"history.md updated — {retro_line(state)}")
-
-    # 7. commit the bookkeeping so main is left clean (harness hard rule)
-    if _git(root, "status", "--porcelain").stdout.strip():
-        _run_or_raise(root, ["add", "-A"], "stage the bookkeeping")
-        _run_or_raise(
+        # 3. merge-or-discard is the completion gate's decision; approve = merge
+        merge = _git(
             root,
-            [*identity, "commit", "-m", f"chore({feat.name}): approval record + status done"],
-            "commit the bookkeeping",
+            *identity,
+            "merge",
+            f"buildwright/{feat.name}",
         )
-        lines.append("bookkeeping committed to main")
+        if merge.returncode != 0:
+            raise FinalizeError(
+                "merge into main failed — resolve it in the main worktree "
+                "(finish the merge or `git merge --abort`), then approve again:\n"
+                + (merge.stderr or merge.stdout).strip()
+            )
+        lines.append(f"merged buildwright/{feat.name} into main")
 
-    # 8. cleanup: everything of value is committed (1) and merged (3), so the
-    #    worktree is disk residue and the branch a dangling ref. Best-effort —
-    #    the feature is already done; a failed cleanup must not fail the run.
-    removal = _git(root, "worktree", "remove", str(worktree))
-    if removal.returncode != 0:
-        # untracked gate logs / .venv leftovers block a clean removal; --force
-        # only discards what step 1 did not consider worth committing
-        _git(root, "worktree", "remove", "--force", str(worktree))
-    if worktree.exists():
-        lines.append(f"worktree kept: {worktree.relative_to(root)} (remove failed)")
-    else:
-        lines.append(f"worktree removed: {worktree.relative_to(root)}")
-        _git(root, "worktree", "prune")
-        branch = f"buildwright/{feat.name}"
-        if _git(root, "branch", "-d", branch).returncode == 0:
-            lines.append(f"branch deleted: {branch} (merged)")
+        # 4. APPROVAL record — only after an explicit completion-gate approval (EARS)
+        approval = root / "harness" / "specs" / feat.name / "APPROVAL"
+        approval.parent.mkdir(parents=True, exist_ok=True)
+        approval.write_text(
+            f"# APPROVAL — {feat.name}\n\n"
+            f"- human: {_human()}\n"
+            f"- date: {date.today().isoformat()}\n"
+            f"- gate: completion gate (`buildwright harness approve`)\n"
+            f"- comments: {state.get('approval_comments', '') or '-'}\n",
+            encoding="utf-8",
+        )
+        lines.append(f"APPROVAL written: {approval.relative_to(root)}")
+
+        # 5. status done — unreachable without the APPROVAL written above
+        set_feature_status(root, feat.name, "done")
+        lines.append(f"status: {feat.name} → done")
+
+        # 6. history.md + retro line (append-only; marker keeps retries idempotent)
+        history = root / "harness" / "progress" / "history.md"
+        history.parent.mkdir(parents=True, exist_ok=True)
+        marker = f"### {feat.name} —"
+        existing = history.read_text(encoding="utf-8") if history.exists() else ""
+        if marker not in existing:
+            entry = (
+                f"\n{marker} {feat.title} ({date.today().isoformat()})\n\n"
+                f"- approved by {_human()} · reviewer: {state.get('verdict', 'APPROVED')} · "
+                f"batches: {state.get('batches_done', 0)}\n"
+                f"{retro_line(state)}\n"
+            )
+            with history.open("a", encoding="utf-8") as fh:
+                fh.write(entry)
+            lines.append(f"history.md updated — {retro_line(state)}")
+
+        # 7. commit the bookkeeping so main is left clean (harness hard rule)
+        if _git(root, "status", "--porcelain").stdout.strip():
+            _run_or_raise(root, ["add", "-A"], "stage the bookkeeping")
+            _run_or_raise(
+                root,
+                [*identity, "commit", "-m", f"chore({feat.name}): approval record + status done"],
+                "commit the bookkeeping",
+            )
+            lines.append("bookkeeping committed to main")
+
+        # 8. cleanup: everything of value is committed (1) and merged (3), so the
+        #    worktree is disk residue and the branch a dangling ref. Best-effort —
+        #    the feature is already done; a failed cleanup must not fail the run.
+        removal = _git(root, "worktree", "remove", str(worktree))
+        if removal.returncode != 0:
+            # untracked gate logs / .venv leftovers block a clean removal; --force
+            # only discards what step 1 did not consider worth committing
+            _git(root, "worktree", "remove", "--force", str(worktree))
+        if worktree.exists():
+            lines.append(f"worktree kept: {worktree.relative_to(root)} (remove failed)")
         else:
-            lines.append(f"branch kept: {branch}")
+            lines.append(f"worktree removed: {worktree.relative_to(root)}")
+            _git(root, "worktree", "prune")
+            branch = f"buildwright/{feat.name}"
+            if _git(root, "branch", "-d", branch).returncode == 0:
+                lines.append(f"branch deleted: {branch} (merged)")
+            else:
+                lines.append(f"branch kept: {branch}")
     return lines
 
 
@@ -990,6 +1063,97 @@ def _gate_node(
     return node
 
 
+def _gauntlet_node(ctx: LoopContext) -> LoopNode:
+    """G1–G4 adversarial gauntlet (module: gauntlet). Skipped when not installed.
+
+    G1 (gauntlet.sh) and G4 (init.sh green + report on disk) are mechanical;
+    G2 (adversarial) + G3 (maintainability) are one agent pass with a structured
+    verdict. Any reject loops back to the implementer — the gauntlet re-runs
+    from G1 (protocol §2).
+    """
+
+    def node(state: LoopState) -> Command:
+        script = ctx.worktree / "harness" / "tools" / "gauntlet.sh"
+        if not script.is_file():
+            return Command(
+                goto="completion_gate",
+                update={
+                    "log": [*state.get("log", []), "gauntlet: not installed — skipped"]
+                },
+            )
+        log = [*state.get("log", [])]
+        fails = dict(state.get("gate_fails", {}))
+
+        # G1 — mechanical correctness (hard gate, log archived on failure)
+        g1 = _run_gate(
+            ctx, "gauntlet-g1", f"bash harness/tools/gauntlet.sh --feature {ctx.feature.name}"
+        )
+        log.append(g1.log)
+
+        # G2+G3 — one adversarial pass by the reviewer model
+        verdict = ctx.run_gauntlet(
+            f"Run the G2 (adversarial) and G3 (maintainability) passes for feature "
+            f"'{ctx.feature.name}' — {ctx.feature.title}. G1 result: "
+            f"{'PASS' if g1.ok else 'FAIL'}."
+        )
+
+        # G4 — evidence: report on disk with the four PASS lines
+        report = ctx.worktree / "harness" / "progress" / f"gauntlet_{ctx.feature.name}.md"
+        g4_ok = g1.ok and verdict.verdict == "APPROVED"
+        lines_report = [
+            f"# Gauntlet — {ctx.feature.name}",
+            "",
+            f"- G1 correctness: {'PASS' if g1.ok else 'FAIL'} (harness/tools/gauntlet.sh)",
+            (
+                f"- G2 adversarial: "
+                f"{'PASS' if verdict.verdict == 'APPROVED' else 'REJECT'}"
+                f" ({len(verdict.g2_findings)} findings)"
+            ),
+            (
+                f"- G3 maintainability: "
+                f"{'PASS' if verdict.verdict == 'APPROVED' else 'REJECT'}"
+                f" — {verdict.g3_notes or 'checked'}"
+            ),
+            f"- G4 evidence: {'PASS' if g4_ok else 'FAIL'} (this report, gate logs)",
+            "",
+            "## Summary",
+            "",
+            verdict.summary or "(none)",
+        ]
+        for finding in verdict.g2_findings:
+            lines_report += ["", f"- [G2] {finding}"]
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text("\n".join(lines_report) + "\n", encoding="utf-8")
+        log.append(f"gauntlet: {verdict.verdict} → {report.relative_to(ctx.worktree)}")
+
+        if g1.ok and verdict.verdict == "APPROVED":
+            fails.pop("gauntlet", None)
+            return Command(
+                goto="completion_gate",
+                update={"gate_fails": fails, "gauntlet_rounds": 0, "log": log},
+            )
+
+        rounds = state.get("gauntlet_rounds", 0) + 1
+        update: LoopState = {"gauntlet_rounds": rounds, "log": log}
+        findings = (
+            "\n".join(f"- {f}" for f in verdict.g2_findings) or verdict.summary or "(none)"
+        )
+        update["dispatch_prompt"] = (
+            f"Gauntlet {'G1' if not g1.ok else 'G2/G3'} rejected (round {rounds}):\n{findings}\n"
+            "Fix every finding; the gauntlet re-runs from G1 afterwards."
+        )
+        if rounds >= ctx.max_review_rounds:
+            update["park_reason"] = (
+                f"gauntlet rejected {rounds}× in a row — human gate"
+            )
+            update["park_target"] = "implement_batch"
+            update["gate_fails"] = fails
+            return Command(goto="park", update=update)
+        return Command(goto="implement_batch", update=update)
+
+    return node
+
+
 def _advance_node(ctx: LoopContext) -> LoopNode:
     def node(state: LoopState) -> Command:
         remaining = next_batch(_read_tasks(ctx), ctx.max_tasks)
@@ -1179,7 +1343,7 @@ def build_loop_graph(
 
         spec_phase -> spec_gate ⏈ -> implement_batch -> verify -> init_gate
           -> advance_batch -> reviewer -> traceability_gate -> audit_gate
-          -> completion_gate ⏈ -> finalize
+          -> gauntlet -> completion_gate ⏈ -> finalize
 
     with `verify`/gates looping back to `implement_batch` on failure and any
     unrecoverable condition routing to `park` (a human gate via `interrupt()`).
@@ -1200,8 +1364,9 @@ def build_loop_graph(
     )
     graph.add_node(
         "audit_gate",
-        _gate_node(ctx, "audit", run_audit_gate, on_pass="completion_gate"),
+        _gate_node(ctx, "audit", run_audit_gate, on_pass="gauntlet"),
     )
+    graph.add_node("gauntlet", _gauntlet_node(ctx))
     graph.add_node("completion_gate", _completion_node(ctx))
     graph.add_node("park", _park_node(ctx))
     graph.add_node("finalize", _finalize_node(ctx))
@@ -1258,6 +1423,7 @@ def initial_seed(ctx: LoopContext) -> LoopState:
         "gate_fails": {},
         "review_rounds": 0,
         "spec_rounds": 0,
+        "gauntlet_rounds": 0,
         "batches_done": 0,
     }
 

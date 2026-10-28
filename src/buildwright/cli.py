@@ -13,6 +13,7 @@ from .config import ROLES, Settings
 from .graph import build_graph
 from .harness import Feature, HarnessProject, format_status
 from .loop import (
+    GauntletVerdict,
     LoopContext,
     LoopState,
     ReviewVerdict,
@@ -136,6 +137,30 @@ def _confirm(ctx: LoopContext, seed: LoopState, yes: bool) -> None:
         raise SystemExit(0)
 
 
+def _select_features(project: HarnessProject, feature: str | None, budget: int) -> list[Feature]:
+    """Features to run this invocation.
+
+    Sequential (default): the loop re-selects after every finalize, so one
+    feature at a time. Parallel (`parallel: true`): up to `budget` runnable
+    features start together — `in_progress` first, then `pending` whose
+    `depends_on` are all done.
+    """
+    if feature:
+        found = _select_feature(project, feature)
+        return [found]
+    if not project.feature_list.project.parallel:
+        return [_select_feature(project, None)]
+    done = {f.name for f in project.feature_list.features if f.status == "done"}
+    runnable = [
+        f
+        for f in project.feature_list.features
+        if f.status == "in_progress" or (f.status == "pending" and f.runnable(done))
+    ]
+    if not runnable:
+        raise RuntimeError("no feature to run — the queue is empty (all features done?)")
+    return runnable[:budget]
+
+
 def _run_one_feature(
     settings: Settings,
     project: HarnessProject,
@@ -146,6 +171,7 @@ def _run_one_feature(
     dispatch: Callable[[str], str] | None,
     review: Callable[[str], ReviewVerdict] | None,
     spec: Callable[[str], str] | None,
+    gauntlet: Callable[[str], GauntletVerdict] | None,
 ) -> bool:
     """Run one feature to its next stopping point; True when it finalized."""
     ctx = make_context(
@@ -157,6 +183,7 @@ def _run_one_feature(
         dispatch=dispatch,
         review=review,
         spec=spec,
+        gauntlet=gauntlet,
     )
     tracer = get_tracer(settings)
     with loop_session(project.root) as saver, tracer.span(
@@ -192,27 +219,67 @@ def cmd_harness_run(
     dispatch: Callable[[str], str] | None = None,
     review: Callable[[str], ReviewVerdict] | None = None,
     spec: Callable[[str], str] | None = None,
+    gauntlet: Callable[[str], GauntletVerdict] | None = None,
 ) -> None:
     """Phase 3: the feature queue — spec gate, batches, hard gates, human gates.
 
-    One invocation processes up to `features` features, one `in_progress` at a
-    time: it stops at each human gate (the process parks there via the
-    checkpointer) and after finalize picks the next `pending` feature.
+    One invocation processes up to `features` features. Sequential by default
+    (re-select after every finalize, stopping at any human gate); with
+    `parallel: true` the selected features start together, one worktree each —
+    main-repo mutations are serialized through MAIN_LOCK.
     """
-    budget = features if feature else max(1, features)
-    done = 0
-    while done < budget:
-        project = HarnessProject.detect(Path(path) if path else None)
-        feat = _select_feature(project, feature)
-        finalized = _run_one_feature(
-            settings, project, feat, max_tasks, max_batches, yes, dispatch, review, spec
-        )
-        done += 1
-        if feature:
-            break  # explicit --feature: exactly one, even if it just finished
-        if not finalized:
-            print(f"\nqueue: '{feat.name}' waits at a human gate — stopping here")
-            break
+    project = HarnessProject.detect(Path(path) if path else None)
+    selected = _select_features(project, feature, max(1, features))
+
+    if len(selected) == 1 or not project.feature_list.project.parallel:
+        done = 0
+        while done < max(1, features):
+            project = HarnessProject.detect(Path(path) if path else None)
+            (feat,) = _select_features(project, feature, 1)
+            finalized = _run_one_feature(
+                settings,
+                project,
+                feat,
+                max_tasks,
+                max_batches,
+                yes,
+                dispatch,
+                review,
+                spec,
+                gauntlet,
+            )
+            done += 1
+            if feature:
+                break  # explicit --feature: exactly one, even if it just finished
+            if not finalized:
+                print(f"\nqueue: '{feat.name}' waits at a human gate — stopping here")
+                break
+        return
+
+    # parallel: independent features, one thread each (one worktree per feature)
+    from concurrent.futures import ThreadPoolExecutor
+
+    print(f"parallel: {len(selected)} features starting together")
+    with ThreadPoolExecutor(max_workers=len(selected)) as pool:
+        futures = {
+            pool.submit(
+                _run_one_feature,
+                settings,
+                project,
+                feat,
+                max_tasks,
+                max_batches,
+                yes,
+                dispatch,
+                review,
+                spec,
+                gauntlet,
+            ): feat
+            for feat in selected
+        }
+        for future, feat in futures.items():
+            if not future.result():
+                print(f"\nqueue: '{feat.name}' waits at a human gate — stopping here")
 
 
 def cmd_harness_gate(
@@ -224,6 +291,7 @@ def cmd_harness_gate(
     dispatch: Callable[[str], str] | None = None,
     review: Callable[[str], ReviewVerdict] | None = None,
     spec: Callable[[str], str] | None = None,
+    gauntlet: Callable[[str], GauntletVerdict] | None = None,
 ) -> None:
     """Resume a parked human gate: approve continues, reject turns back."""
     project = HarnessProject.detect(Path(path) if path else None)
@@ -253,6 +321,7 @@ def cmd_harness_gate(
                 dispatch=dispatch,
                 review=review,
                 spec=spec,
+                gauntlet=gauntlet,
             )
             graph = build_loop_graph(ctx, saver)
             snap = graph.get_state({"configurable": {"thread_id": feat.name}})

@@ -48,6 +48,11 @@ class Feature(BaseModel):
     status: Status
     wekan_card: str | None = None
     part_of: str | None = None
+    depends_on: list[str] = Field(default_factory=list)
+
+    def runnable(self, done: set[str]) -> bool:
+        """True when every dependency is `done` (a feature alone is runnable)."""
+        return all(dep in done for dep in self.depends_on)
 
 
 class FeatureList(BaseModel):

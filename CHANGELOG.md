@@ -25,6 +25,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   committed to `main` immediately, keeping `finalize`'s clean-main gate honest.
   `spec_ready` features now appear as gate-resume candidates.
 
+### Added (phase 3b)
+
+- **`depends_on` + `parallel: true`.** A pending feature is only runnable when
+  every feature in its `depends_on` list is `done`. With `parallel: true` the
+  queue starts up to `--features N` runnable features together, one thread and
+  one worktree each; every main-repo mutation (board flips, finalize's merge)
+  goes through a process-wide lock so concurrent `git add/commit/merge` on main
+  can never race on git's `index.lock`. Human gates still stop their own
+  feature only.
+- **Gauntlet as a runtime node.** When the gauntlet module is installed
+  (`harness/tools/gauntlet.sh` present), the loop inserts a G1–G4 pass between
+  the audit and the completion gate: G1 runs the script mechanically, G2
+  (adversarial) and G3 (maintainability) are a single reviewer-model pass with
+  a structured verdict (`GauntletVerdict`), and G4 writes
+  `harness/progress/gauntlet_<name>.md` with the protocol's four PASS lines.
+  A reject feeds the findings back to the implementer and re-runs from G1
+  (two consecutive rejects park). Without the module the node logs
+  `gauntlet: not installed — skipped`. `gauntlet.sh` joins the default
+  command allowlist.
+
 ## [0.4.3] - 2026-10-28
 
 ### Fixed

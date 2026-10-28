@@ -20,6 +20,7 @@ from buildwright.cli import cmd_harness_gate, cmd_harness_run
 from buildwright.config import Settings
 from buildwright.harness import HarnessProject
 from buildwright.loop import (
+    GauntletVerdict,
     LoopContext,
     ReviewVerdict,
     build_loop_graph,
@@ -58,11 +59,15 @@ def make_repo(
     tasks: tuple[str, ...] = ("T1", "one", "T2", "two", "T3", "three"),
     init_sh: str = "#!/bin/bash\necho 'tests green'\necho '[OK]'\n",
     queue: bool = False,
+    parallel: bool = False,
+    gauntlet_sh: str | None = None,
 ) -> Path:
     """A harness-initialized git project with one in_progress feature.
 
     `queue=True` adds a second, `pending` feature (f0_new) with no spec —
-    the phase-3 queue picks it after f2_hub finalizes.
+    the phase-3 queue picks it after f2_hub finalizes. `parallel=True` sets
+    the project flag (features start together). `gauntlet_sh` writes the
+    module's mechanical gate script.
     """
     root = tmp_path / "proj"
     spec = root / "harness" / "specs" / "f2_hub"
@@ -94,7 +99,7 @@ def make_repo(
             {
                 "project": {
                     "name": "demo",
-                    "parallel": False,
+                    "parallel": parallel,
                     "modules": ["api"],
                     "audit_level": audit_level,
                 },
@@ -108,6 +113,10 @@ def make_repo(
     rows = "\n".join(f"- [ ] {tasks[i]}: {tasks[i + 1]}" for i in range(0, len(tasks), 2))
     (spec / "tasks.md").write_text(f"# Tasks\n\n{rows}\n", encoding="utf-8")
     (root / "harness" / "init.sh").write_text(init_sh, encoding="utf-8")
+    if gauntlet_sh is not None:
+        tools = root / "harness" / "tools"
+        tools.mkdir(parents=True, exist_ok=True)
+        (tools / "gauntlet.sh").write_text(gauntlet_sh, encoding="utf-8")
     (root / "docs").mkdir()
     (root / "docs" / "architecture.md").write_text("# Arch\n", encoding="utf-8")
     git(root, "init", "-b", "main")
@@ -188,6 +197,18 @@ class ScriptedSpec:
         return "DONE — spec trio written"
 
 
+class ScriptedGauntlet:
+    """Gauntlet reviewer with a scripted verdict list (last one repeats)."""
+
+    def __init__(self, *verdicts: GauntletVerdict):
+        self.verdicts = list(verdicts)
+        self.prompts: list[str] = []
+
+    def __call__(self, prompt: str) -> GauntletVerdict:
+        self.prompts.append(prompt)
+        return self.verdicts.pop(0) if len(self.verdicts) > 1 else self.verdicts[0]
+
+
 def ctx_for(
     root: Path,
     dispatch: Callable[[str], str],
@@ -196,6 +217,7 @@ def ctx_for(
     max_tasks: int = 3,
     max_batches: int = 10,
     spec: Callable[[str], str] | None = None,
+    gauntlet: Callable[[str], GauntletVerdict] | None = None,
     feature: str = "f2_hub",
 ) -> LoopContext:
     project = HarnessProject.load(root)
@@ -208,6 +230,7 @@ def ctx_for(
         dispatch=dispatch,
         review=review,
         spec=spec,
+        gauntlet=gauntlet,
     )
 
 
@@ -645,6 +668,106 @@ def test_cli_run_parks_and_gate_approve_finalizes(tmp_path: Path, capsys):
     assert "lgtm after review" in approval
     fl = json.loads((root / "harness" / "feature_list.json").read_text())
     assert fl["features"][0]["status"] == "done"
+
+
+def test_gauntlet_passes_and_reaches_completion(tmp_path: Path):
+    """G1 script + G2/G3 verdict APPROVED → report with 4 PASS lines → completion."""
+    root = make_repo(
+        tmp_path, gauntlet_sh="#!/bin/bash\necho 'gauntlet: ok'\nexit 0\n"
+    )
+    gauntlet = ScriptedGauntlet(
+        GauntletVerdict(verdict="APPROVED", g3_notes="conventions ok", summary="solid")
+    )
+    ctx = ctx_for(root, FakeDispatch(root), ScriptedReview(APPROVED), gauntlet=gauntlet)
+
+    out = invoke(ctx, prepare_seed(ctx, None))
+    payload = interrupt_payload(out)
+    assert payload["gate"] == "completion"
+    assert any("gauntlet: APPROVED" in line for line in out["log"])  # type: ignore[attr-defined]
+    report = ctx.worktree / "harness" / "progress" / "gauntlet_f2_hub.md"
+    text = report.read_text(encoding="utf-8")
+    assert text.count("PASS") == 4
+    assert "conventions ok" in text
+
+
+def test_gauntlet_reject_feeds_back_then_passes(tmp_path: Path):
+    root = make_repo(
+        tmp_path, gauntlet_sh="#!/bin/bash\necho 'gauntlet: ok'\nexit 0\n"
+    )
+    gauntlet = ScriptedGauntlet(
+        GauntletVerdict(
+            verdict="REJECTED",
+            g2_findings=["null device id crashes the gateway"],
+            summary="one real finding",
+        ),
+        GauntletVerdict(verdict="APPROVED", summary="fixed"),
+    )
+    dispatch = FakeDispatch(root)
+    ctx = ctx_for(root, dispatch, ScriptedReview(APPROVED), gauntlet=gauntlet)
+
+    out = invoke(ctx, prepare_seed(ctx, None))
+    payload = interrupt_payload(out)
+    assert payload["gate"] == "completion"
+    # the finding reached the implementer as feedback
+    assert any("null device id" in p for p in dispatch.prompts)
+
+
+def test_gauntlet_absent_is_skipped(tmp_path: Path):
+    root = make_repo(tmp_path)  # no gauntlet.sh
+    ctx = ctx_for(root, FakeDispatch(root), ScriptedReview(APPROVED))
+    out = invoke(ctx, prepare_seed(ctx, None))
+    assert interrupt_payload(out)["gate"] == "completion"
+    assert any("gauntlet: not installed" in line for line in out["log"])  # type: ignore[attr-defined]
+
+
+def test_parallel_depends_on_blocks_selection(tmp_path: Path):
+    """A pending feature whose deps are not done is not runnable."""
+    root = make_repo(tmp_path, queue=True, parallel=True)
+    fl_path = root / "harness" / "feature_list.json"
+    fl = json.loads(fl_path.read_text())
+    for f in fl["features"]:
+        if f["name"] == "f0_new":
+            f["depends_on"] = ["f2_hub"]  # f2_hub is in_progress, not done
+    fl_path.write_text(json.dumps(fl, indent=2, ensure_ascii=False) + "\n")
+
+    project = HarnessProject.load(root)
+    from buildwright.cli import _select_features
+
+    selected = _select_features(project, None, 5)
+    assert [f.name for f in selected] == ["f2_hub"]  # f0_new blocked by dependency
+
+    set_feature_status(root, "f2_hub", "done")
+    project = HarnessProject.load(root)
+    selected = _select_features(project, None, 5)
+    assert {f.name for f in selected} == {"f0_new"}
+
+
+def test_parallel_starts_both_features(tmp_path: Path, capsys):
+    """parallel: true — in_progress + pending runnable start together."""
+    root = make_repo(tmp_path, queue=True, parallel=True)
+    settings = Settings()
+    fakes = {
+        "f2_hub": FakeDispatch(root, feature="f2_hub"),
+        "f0_new": FakeDispatch(root, feature="f0_new"),
+    }
+    spec = ScriptedSpec(root, "f0_new")
+
+    def dispatch(prompt: str) -> str:
+        m = re.search(r"Feature: (\w+)", prompt)
+        return fakes[m.group(1)](prompt)  # type: ignore[union-attr]
+
+    cmd_harness_run(
+        settings, None, 3, 10, 2, str(root), True,
+        dispatch=dispatch, review=ScriptedReview(APPROVED), spec=spec,
+    )
+    out = capsys.readouterr().out
+    assert "parallel: 2 features starting together" in out
+    assert "[completion gate] f2_hub" in out  # in_progress ran its loop
+    assert "[spec gate] f0_new" in out  # pending got its spec and parked
+    fl = json.loads((root / "harness" / "feature_list.json").read_text())
+    statuses = {f["name"]: f["status"] for f in fl["features"]}
+    assert statuses["f2_hub"] == "in_progress"  # parked at completion gate
+    assert statuses["f0_new"] == "spec_ready"  # parked at spec gate
 
 
 def test_cli_queue_picks_pending_after_finalize(tmp_path: Path, capsys):

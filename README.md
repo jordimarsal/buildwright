@@ -120,6 +120,12 @@ buildwright harness reject  "add tests for R1"      # resume a parked gate: reje
     `[OK]`, `check-traceability.py`, and `audit-security.sh` / `bench.sh` for
     standard/strict). A failing gate feeds its log back to the implementer and
     loops back; 3 consecutive failures park the feature.
+  - **gauntlet** (module installed): G1 runs `harness/tools/gauntlet.sh`
+    mechanically; G2 (adversarial) + G3 (maintainability) are one reviewer-model
+    pass with a structured verdict; G4 writes
+    `harness/progress/gauntlet_<name>.md` with the four PASS lines. A reject
+    feeds the findings back to the implementer and the gauntlet re-runs from G1.
+    Without the module the node is skipped.
   - the **reviewer** issues a structured `APPROVED` / `CHANGES_REQUESTED` verdict
     written to `harness/progress/review_<name>.md`; two rejections in a row park.
 
