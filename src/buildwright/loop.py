@@ -38,6 +38,7 @@ from .config import Settings
 from .harness import Feature, FeatureList, HarnessProject
 from .registry import ModelRegistry
 from .runtime import (
+    GIT_IDENTITY,
     Sandbox,
     Task,
     build_implementer,
@@ -326,9 +327,6 @@ def _human() -> str:
         return "unknown"
 
 
-_IDENTITY = ["-c", "user.name=buildwright", "-c", "user.email=buildwright@localhost"]
-
-
 def _commit_main_status(root: Path, feature_name: str, status: str) -> None:
     """Flip status on main AND commit it, leaving main clean (harness hard rule).
 
@@ -342,7 +340,7 @@ def _commit_main_status(root: Path, feature_name: str, status: str) -> None:
     _run_or_raise(root, ["add", "-A"], "stage the status flip")
     _run_or_raise(
         root,
-        [*_IDENTITY, "commit", "-m", f"chore({feature_name}): status {status}"],
+        [*GIT_IDENTITY, "commit", "-m", f"chore({feature_name}): status {status}"],
         "commit the status flip",
     )
 
@@ -351,7 +349,7 @@ def _finalize(ctx: LoopContext, state: LoopState) -> list[str]:
     """Merge, then APPROVAL → status done → history.md + retro, then commit clean."""
     root, worktree, feat = ctx.project.root, ctx.worktree, ctx.feature
     lines: list[str] = []
-    identity = ["-c", "user.name=buildwright", "-c", "user.email=buildwright@localhost"]
+    identity = GIT_IDENTITY
 
     # 1. commit the worktree (the runtime is the committer; the commit-msg hook
     #    still runs and enforces Conventional Commits)

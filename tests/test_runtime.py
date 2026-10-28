@@ -132,3 +132,27 @@ def test_worktree_and_verify_on_disk(harness_repo: Path):
     assert "harness/specs/f1_api/tasks.md" in report.changed_files
     # reuse: second call must not create a second worktree
     assert create_worktree(harness_repo, "f1_api") == wt
+
+
+def test_reused_worktree_syncs_with_main(harness_repo: Path):
+    """A worktree stays pinned to its branch — main moving must reach it.
+
+    Otherwise the implementer dispatches against a tree missing the spec/docs
+    committed in between and reports `blocked` for a spec that exists on main.
+    """
+    wt = create_worktree(harness_repo, "f1_api")
+    spec = harness_repo / "harness" / "specs" / "f1_api" / "requirements.md"
+    spec.write_text("# Requirements — f1_api\n\n- R1: the thing works.\n", encoding="utf-8")
+    git(harness_repo, "add", "-A")
+    git(harness_repo, "commit", "-m", "spec: requirements for f1_api")
+
+    assert create_worktree(harness_repo, "f1_api") == wt
+    assert (wt / "harness" / "specs" / "f1_api" / "requirements.md").is_file()
+    # up to date with main: the worktree follows it, it does not diverge
+    behind = subprocess.run(
+        ["git", "-C", str(wt), "rev-list", "--count", "HEAD..main"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert behind.stdout.strip() == "0"

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A **reused feature worktree is now synced with `main`** before the next
+  dispatch. `create_worktree()` returned an existing worktree as-is, so a
+  branch created earlier stayed pinned to its original commit: specs, docs or
+  source committed to main afterwards were invisible to the implementer, which
+  then reported `blocked` against a tree missing its own spec. The worktree now
+  fast-forwards when it has no commits of its own, merges when it does, and
+  raises a clear error when git refuses (local changes in the way) instead of
+  silently dispatching against a stale tree.
 - Provider keys documented in `.env` (`OPENAI_API_KEY`, `ZAI_API_KEY`, …) are
   now actually read. `registry.build()` resolved them from `os.environ` only,
   while pydantic-settings loads `.env` for the `BW_*` settings alone — so a key

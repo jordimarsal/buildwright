@@ -21,6 +21,14 @@ from pydantic_ai.models import Model
 MAX_TOOL_OUTPUT = 4000
 MAX_BATCH_TASKS = 4  # harness batching discipline: never 5+
 
+# Identity used for the commits the runtime itself makes (status flips, merges).
+GIT_IDENTITY: tuple[str, ...] = (
+    "-c",
+    "user.name=buildwright",
+    "-c",
+    "user.email=buildwright@localhost",
+)
+
 DEFAULT_ALLOWED_COMMANDS: tuple[str, ...] = (
     "uv run",
     "uv sync",
@@ -266,10 +274,51 @@ def next_batch(tasks: list[Task], max_tasks: int = 3) -> list[Task]:
 # ---------- worktree isolation ----------
 
 
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _current_branch(cwd: Path) -> str | None:
+    proc = _git(cwd, "symbolic-ref", "--short", "HEAD")
+    return proc.stdout.strip() or None
+
+
+def sync_worktree(root: Path, worktree: Path) -> None:
+    """Bring a reused worktree up to date with main before the next dispatch.
+
+    A worktree stays pinned to the commit it branched from, so anything committed
+    to main afterwards — specs, docs, source — would be invisible to the
+    implementer, which then reports `blocked` against a tree missing its own
+    spec. Fast-forward when the branch has no commits of its own, merge when it
+    does; a merge git refuses (local changes in the way) is raised instead of
+    silently dispatching against a stale tree.
+    """
+    branch = _current_branch(worktree)
+    main = _current_branch(root)
+    if branch is None or main is None or main == branch:
+        return
+    if _git(worktree, "merge", "--ff-only", main).returncode == 0:
+        return
+    merge = _git(worktree, *GIT_IDENTITY, "merge", main)
+    if merge.returncode == 0:
+        return
+    raise RuntimeError(
+        f"worktree {worktree} cannot be synced with {main}: "
+        f"{(merge.stderr or merge.stdout).strip()}\n"
+        "Finish the merge in the worktree (or `git merge --abort`) and re-run."
+    )
+
+
 def create_worktree(root: Path, feature_name: str) -> Path:
     """Create (or reuse) a git worktree for the feature, kept out of git status."""
     wt = root / ".buildwright" / "worktrees" / feature_name
     if (wt / ".git").exists():
+        sync_worktree(root, wt)
         return wt
     branch = f"buildwright/{feature_name}"
     exists = subprocess.run(
