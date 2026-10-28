@@ -113,6 +113,13 @@ buildwright harness reject  "add tests for R1"      # resume a parked gate: reje
     loops back; 3 consecutive failures park the feature.
   - the **reviewer** issues a structured `APPROVED` / `CHANGES_REQUESTED` verdict
     written to `harness/progress/review_<name>.md`; two rejections in a row park.
+
+  All cycle counters (`max_batch_attempts`, `max_gate_cycles`,
+  `max_review_rounds`) count **consecutive** failures and reset on any progress
+  (a completed batch resets the batch/gate counters, an `APPROVED` verdict resets
+  `review_rounds`). So a human `reject` at the completion gate that sends the
+  feature back to the implementer can loop as many times as you ask it to — it
+  never trips a cap that was counting an earlier, unrelated streak.
   - **completion_gate** is a human gate: the loop `interrupt()`s and parks, with
     state persisted in a sqlite checkpointer (`.buildwright/checkpoints.sqlite`)
     so it survives restarts. `approve` **merges to main**, writes
