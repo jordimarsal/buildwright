@@ -1,5 +1,6 @@
 import pytest
 
+from buildwright.config import resolve_env
 from buildwright.registry import ModelRegistry
 
 YAML = """
@@ -55,3 +56,21 @@ def test_build_remote_with_key(tmp_path, monkeypatch):
     registry = write_registry(tmp_path)
     model = registry.build("remote/gpt-4o-mini")
     assert model.model_name == "gpt-4o-mini"
+
+
+def test_build_remote_key_comes_from_dotenv(tmp_path, monkeypatch):
+    """`.env` documents provider keys — they must reach the client (D: config)."""
+    monkeypatch.delenv("TEST_MODEL_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("# provider keys\nTEST_MODEL_KEY = 'sk-dotenv'\n")
+    assert resolve_env("TEST_MODEL_KEY") == "sk-dotenv"  # no RuntimeError on build
+    model = write_registry(tmp_path).build("remote/gpt-4o-mini")
+    assert model.model_name == "gpt-4o-mini"
+
+
+def test_process_env_wins_over_dotenv(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("TEST_MODEL_KEY=sk-dotenv\n")
+    monkeypatch.setenv("TEST_MODEL_KEY", "sk-process")
+    assert resolve_env("TEST_MODEL_KEY") == "sk-process"
+    assert resolve_env("MISSING_KEY") == ""

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Provider keys documented in `.env` (`OPENAI_API_KEY`, `ZAI_API_KEY`, …) are
+  now actually read. `registry.build()` resolved them from `os.environ` only,
+  while pydantic-settings loads `.env` for the `BW_*` settings alone — so a key
+  written to `.env` failed with `requires env var … (not set)`. The process
+  environment still wins; the project `.env` is the fallback, and the error
+  message now says both sources.
+
 ## [0.4.0] - 2026-10-27
 
 ### Added

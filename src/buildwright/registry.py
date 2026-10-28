@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Literal
 
@@ -9,6 +8,8 @@ from pydantic import BaseModel
 from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
+
+from buildwright.config import resolve_env
 
 
 class ModelSpec(BaseModel):
@@ -48,10 +49,11 @@ class ModelRegistry:
         s = self.spec(model_id)
         api_key = "local"  # ollama/llama.cpp ignore it; the client requires non-empty
         if s.api_key_env:
-            api_key = os.environ.get(s.api_key_env, "")
+            api_key = resolve_env(s.api_key_env)
             if not api_key:
                 raise RuntimeError(
-                    f"model '{s.id}' requires env var {s.api_key_env} (not set)"
+                    f"model '{s.id}' requires {s.api_key_env} "
+                    "(not in the environment or .env)"
                 )
         return OpenAIChatModel(
             s.model or s.id.split("/", 1)[1],
