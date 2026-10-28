@@ -57,11 +57,38 @@ def make_repo(
     audit_level: str = "basic",
     tasks: tuple[str, ...] = ("T1", "one", "T2", "two", "T3", "three"),
     init_sh: str = "#!/bin/bash\necho 'tests green'\necho '[OK]'\n",
+    queue: bool = False,
 ) -> Path:
-    """A harness-initialized git project with one in_progress feature."""
+    """A harness-initialized git project with one in_progress feature.
+
+    `queue=True` adds a second, `pending` feature (f0_new) with no spec —
+    the phase-3 queue picks it after f2_hub finalizes.
+    """
     root = tmp_path / "proj"
     spec = root / "harness" / "specs" / "f2_hub"
     spec.mkdir(parents=True)
+    features: list[dict] = [
+        {
+            "id": 1,
+            "name": "f2_hub",
+            "title": "Hub endpoint",
+            "description": "one hub",
+            "acceptance": ["A1: it hubs"],
+            "status": "in_progress",
+        }
+    ]
+    if queue:
+        features.insert(
+            0,
+            {
+                "id": 0,
+                "name": "f0_new",
+                "title": "Future thing",
+                "description": "not started",
+                "acceptance": ["A0: it works"],
+                "status": "pending",
+            },
+        )
     (root / "harness" / "feature_list.json").write_text(
         json.dumps(
             {
@@ -71,16 +98,7 @@ def make_repo(
                     "modules": ["api"],
                     "audit_level": audit_level,
                 },
-                "features": [
-                    {
-                        "id": 1,
-                        "name": "f2_hub",
-                        "title": "Hub endpoint",
-                        "description": "one hub",
-                        "acceptance": ["A1: it hubs"],
-                        "status": "in_progress",
-                    }
-                ],
+                "features": features,
             }
         ),
         encoding="utf-8",
@@ -144,6 +162,32 @@ class ScriptedReview:
         return self.verdicts.pop(0) if len(self.verdicts) > 1 else self.verdicts[0]
 
 
+class ScriptedSpec:
+    """Offline spec-author: writes the trio into the worktree (or skips).
+
+    Resolves the feature worktree from the project root at call time — by then
+    `make_context` has created it.
+    """
+
+    def __init__(self, root: Path, feature: str = "f0_new", *, writes: bool = True):
+        self.worktree = root / ".buildwright" / "worktrees" / feature
+        self.writes = writes
+        self.prompts: list[str] = []
+
+    def __call__(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        if not self.writes:
+            return "thought about it (nothing written)"
+        base = self.worktree / "harness" / "specs" / "f0_new"
+        base.mkdir(parents=True, exist_ok=True)
+        (base / "requirements.md").write_text(
+            "R1: it works\n\n| R1 | | | pending |\n", encoding="utf-8"
+        )
+        (base / "design.md").write_text("# Design\n", encoding="utf-8")
+        (base / "tasks.md").write_text("- [ ] T1: do it (refs R1)\n", encoding="utf-8")
+        return "DONE — spec trio written"
+
+
 def ctx_for(
     root: Path,
     dispatch: Callable[[str], str],
@@ -151,35 +195,44 @@ def ctx_for(
     *,
     max_tasks: int = 3,
     max_batches: int = 10,
+    spec: Callable[[str], str] | None = None,
+    feature: str = "f2_hub",
 ) -> LoopContext:
     project = HarnessProject.load(root)
     return make_context(
         project,
         Settings(),
-        "f2_hub",
+        feature,
         max_tasks=max_tasks,
         max_batches=max_batches,
         dispatch=dispatch,
         review=review,
+        spec=spec,
     )
 
 
 CFG: RunnableConfig = {"configurable": {"thread_id": "f2_hub"}}
 
 
-def invoke(ctx: LoopContext, seed: object):
+def cfg_for(feature: str) -> RunnableConfig:
+    return {"configurable": {"thread_id": feature}}
+
+
+def invoke(ctx: LoopContext, seed: object, cfg: RunnableConfig = CFG):
     with loop_session(ctx.project.root) as saver:
         graph = build_loop_graph(ctx, saver)
-        return graph.invoke(seed, CFG)  # type: ignore[arg-type]
+        return graph.invoke(seed, cfg)  # type: ignore[arg-type]
 
 
-def resume(ctx: LoopContext, decision: str, comments: str = "") -> object:
+def resume(
+    ctx: LoopContext, decision: str, comments: str = "", cfg: RunnableConfig = CFG
+) -> object:
     """Resume a parked gate in a *fresh* session — state survives restarts."""
     with loop_session(ctx.project.root) as saver:
         graph = build_loop_graph(ctx, saver)
-        assert pending_interrupt(graph.get_state(CFG))  # type: ignore[arg-type]
+        assert pending_interrupt(graph.get_state(cfg))  # type: ignore[arg-type]
         return graph.invoke(
-            Command(resume={"decision": decision, "comments": comments}), CFG  # type: ignore[arg-type]
+            Command(resume={"decision": decision, "comments": comments}), cfg  # type: ignore[arg-type]
         )
 
 
@@ -255,6 +308,76 @@ def test_full_loop_approve_end_to_end(tmp_path: Path):
         text=True,
     )
     assert status.stdout.strip() == ""
+
+
+def test_spec_gate_approve_runs_the_feature(tmp_path: Path):
+    """Phase 3 entry: a pending feature gets its spec, a human gate, then the loop."""
+    root = make_repo(tmp_path, queue=True)
+    dispatch = FakeDispatch(root, feature="f0_new")
+    spec = ScriptedSpec(root, "f0_new")
+    ctx = ctx_for(root, dispatch, ScriptedReview(APPROVED), spec=spec, feature="f0_new")
+    cfg = cfg_for("f0_new")
+
+    out = invoke(ctx, prepare_seed(ctx, None), cfg)
+    payload = interrupt_payload(out)
+    assert payload["gate"] == "spec"  # parked at the SPEC gate, not completion
+    # the spec trio was authored into the worktree and the board says spec_ready
+    assert (ctx.worktree / "harness" / "specs" / "f0_new" / "tasks.md").is_file()
+    fl = json.loads((root / "harness" / "feature_list.json").read_text())
+    assert fl["features"][0]["status"] == "spec_ready"
+
+    out2 = resume(ctx, "approve", "spec looks right", cfg)
+    assert interrupt_payload(out2)["gate"] == "completion"  # it ran the whole loop
+    fl = json.loads((root / "harness" / "feature_list.json").read_text())
+    assert fl["features"][0]["status"] == "in_progress"  # not done yet (parked)
+    assert any("spec looks right" in p for p in dispatch.prompts) is False  # spec, not impl
+
+    out3 = resume(ctx, "approve", "ship it", cfg)
+    assert isinstance(out3, dict) and out3["finalized"] is True
+    fl = json.loads((root / "harness" / "feature_list.json").read_text())
+    assert fl["features"][0]["status"] == "done"
+
+
+def test_spec_gate_reject_reworks_then_parks(tmp_path: Path):
+    root = make_repo(tmp_path, queue=True)
+    spec = ScriptedSpec(root, "f0_new")
+    ctx = ctx_for(root, FakeDispatch(root, feature="f0_new"), ScriptedReview(APPROVED), spec=spec, feature="f0_new")
+    cfg = cfg_for("f0_new")
+
+    out = invoke(ctx, prepare_seed(ctx, None), cfg)
+    assert interrupt_payload(out)["gate"] == "spec"
+
+    out2 = resume(ctx, "reject", "split R1 into two requirements", cfg)
+    assert interrupt_payload(out2)["gate"] == "spec"  # reworked, back at the gate
+    assert any("split R1" in p for p in spec.prompts)  # feedback reached the spec-author
+
+    out3 = resume(ctx, "reject", "still wrong", cfg)
+    payload = interrupt_payload(out3)
+    assert payload["gate"] == "parked"  # 2 rejections in a row → park blocked
+    assert "spec rejected 2" in payload["reason"]
+
+    # the human fixes the spec themselves, then approves → re-author, re-gate
+    out4 = resume(ctx, "approve", "fixed it myself", cfg)
+    assert interrupt_payload(out4)["gate"] == "spec"  # the revised spec is gated again
+    out5 = resume(ctx, "approve", "now it's right", cfg)
+    assert interrupt_payload(out5)["gate"] == "completion"  # the loop ran to the end
+    out6 = resume(ctx, "approve", "ship it", cfg)
+    assert isinstance(out6, dict) and out6["finalized"] is True
+
+
+def test_spec_incomplete_redispatches_then_stalls_out(tmp_path: Path):
+    root = make_repo(tmp_path, queue=True)
+    spec = ScriptedSpec(root, "f0_new", writes=False)
+    ctx = ctx_for(root, FakeDispatch(root, feature="f0_new"), ScriptedReview(APPROVED), spec=spec, feature="f0_new")
+    ctx.max_batch_attempts = 2  # cap the stall loop quickly
+    cfg = cfg_for("f0_new")
+
+    out = invoke(ctx, prepare_seed(ctx, None), cfg)
+    payload = interrupt_payload(out)
+    assert payload["gate"] == "parked"
+    assert "spec incomplete" in payload["reason"]
+    # the re-dispatch carried the stall opening (Nothing was written)
+    assert any("Nothing was written" in p for p in spec.prompts[1:])
 
 
 def test_completion_gate_reject_loops_back(tmp_path: Path):
@@ -513,7 +636,7 @@ def test_cli_run_parks_and_gate_approve_finalizes(tmp_path: Path, capsys):
     dispatch = FakeDispatch(root)
     settings = Settings()
 
-    cmd_harness_run(settings, None, 3, 10, str(root), True, dispatch=dispatch, review=ScriptedReview(APPROVED))
+    cmd_harness_run(settings, None, 3, 10, 1, str(root), True, dispatch=dispatch, review=ScriptedReview(APPROVED))
     printed = capsys.readouterr().out
     assert "[completion gate] f2_hub" in printed
 
@@ -524,19 +647,61 @@ def test_cli_run_parks_and_gate_approve_finalizes(tmp_path: Path, capsys):
     assert fl["features"][0]["status"] == "done"
 
 
+def test_cli_queue_picks_pending_after_finalize(tmp_path: Path, capsys):
+    """Phase 3 queue: in_progress first; after finalize the next pending runs."""
+    root = make_repo(tmp_path, queue=True)
+    settings = Settings()
+
+    fakes = {
+        "f2_hub": FakeDispatch(root, feature="f2_hub"),
+        "f0_new": FakeDispatch(root, feature="f0_new"),
+    }
+    spec = ScriptedSpec(root, "f0_new")
+
+    def dispatch(prompt: str) -> str:
+        # route by the feature named in the dispatch header
+        m = re.search(r"Feature: (\w+)", prompt)
+        return fakes[m.group(1)](prompt)
+
+    # 1. first invocation: f2_hub (in_progress) runs to its completion gate
+    cmd_harness_run(settings, None, 3, 10, 2, str(root), True, dispatch=dispatch, review=ScriptedReview(APPROVED), spec=spec)
+    out1 = capsys.readouterr().out
+    assert "[completion gate] f2_hub" in out1
+    assert "queue: 'f2_hub' waits at a human gate" in out1
+
+    # 2. approve it → finalized; the queue does NOT keep going (gate was human)
+    cmd_harness_gate(settings, "approve", "lgtm", None, str(root), dispatch=dispatch, review=ScriptedReview(APPROVED), spec=spec)
+
+    # 3. next invocation: f0_new (pending) gets its spec → parked at the spec gate
+    cmd_harness_run(settings, None, 3, 10, 2, str(root), True, dispatch=dispatch, review=ScriptedReview(APPROVED), spec=spec)
+    out = capsys.readouterr().out
+    assert "[spec gate] f0_new" in out
+
+    # 4. approve the spec → whole loop → completion gate; approve → done
+    cmd_harness_gate(settings, "approve", "spec ok", None, str(root), dispatch=dispatch, review=ScriptedReview(APPROVED), spec=spec)
+    assert "[completion gate] f0_new" in capsys.readouterr().out
+    cmd_harness_gate(settings, "approve", "ship", None, str(root), dispatch=dispatch, review=ScriptedReview(APPROVED), spec=spec)
+
+    fl = json.loads((root / "harness" / "feature_list.json").read_text())
+    assert {f["name"]: f["status"] for f in fl["features"]} == {
+        "f0_new": "done",
+        "f2_hub": "done",
+    }
+
+
 def test_cli_refuses_non_in_progress_features(tmp_path: Path):
     root = make_repo(tmp_path)
     set_feature_status(root, "f2_hub", "blocked")
     settings = Settings()
     # explicit --feature reaches the per-feature status guard
     with pytest.raises(RuntimeError, match="blocked"):
-        cmd_harness_run(settings, "f2_hub", 3, 10, str(root), True)
+        cmd_harness_run(settings, "f2_hub", 3, 10, 1, str(root), True)
     set_feature_status(root, "f2_hub", "done")
     with pytest.raises(RuntimeError, match="in_progress"):
-        cmd_harness_run(settings, "f2_hub", 3, 10, str(root), True)
+        cmd_harness_run(settings, "f2_hub", 3, 10, 1, str(root), True)
     # without --feature, a board with no in_progress feature is refused up front
-    with pytest.raises(RuntimeError, match="no feature is in_progress"):
-        cmd_harness_run(settings, None, 3, 10, str(root), True)
+    with pytest.raises(RuntimeError, match="queue is empty"):
+        cmd_harness_run(settings, None, 3, 10, 1, str(root), True)
 
 
 def test_cli_gate_without_worktree_errors(tmp_path: Path):

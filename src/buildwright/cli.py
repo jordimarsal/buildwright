@@ -84,21 +84,29 @@ def _select_feature(project: HarnessProject, feature: str | None) -> Feature:
             raise KeyError(f"feature '{feature}' not found in {project.root}")
     else:
         in_progress = project.by_status("in_progress")
-        if not in_progress:
-            raise RuntimeError(
-                "no feature is in_progress — the loop executes in_progress "
-                "features (the spec gate was approved interactively)"
-            )
-        feat = in_progress[0]
+        if in_progress:
+            feat = in_progress[0]
+        else:
+            pending = project.by_status("pending")
+            if not pending:
+                raise RuntimeError(
+                    "no feature to run — the queue is empty (all features done?)"
+                )
+            feat = pending[0]
     if feat.status == "blocked":
         raise RuntimeError(
             f"feature '{feat.name}' is blocked — resume it with "
             "`buildwright harness approve` (or set it in_progress manually)"
         )
-    if feat.status != "in_progress":
+    if feat.status == "spec_ready":
+        raise RuntimeError(
+            f"feature '{feat.name}' is spec_ready — its spec gate is parked; "
+            "resume it with `buildwright harness approve` or `reject`"
+        )
+    if feat.status not in ("in_progress", "pending"):
         raise RuntimeError(
             f"feature '{feat.name}' is '{feat.status}'; the loop only executes "
-            "in_progress features"
+            "in_progress or pending features"
         )
     return feat
 
@@ -106,6 +114,15 @@ def _select_feature(project: HarnessProject, feature: str | None) -> Feature:
 def _confirm(ctx: LoopContext, seed: LoopState, yes: bool) -> None:
     level = ctx.project.feature_list.project.audit_level
     print(f"\nfeature       {ctx.feature.name} — {ctx.feature.title}")
+    if ctx.feature.status == "pending":
+        print("phase         spec — the spec-author writes the trio, then a human gate")
+        print(f"spec-author   {ctx.settings.role_model('planner')}")
+        print(f"worktree      {ctx.worktree}")
+        print(f"gates         spec gate (human) · init.sh · traceability · audit ({level})")
+        if not yes and input("proceed? [y/N] ").strip().lower() != "y":
+            print("aborted")
+            raise SystemExit(0)
+        return
     print(
         f"batch         {', '.join(str(b) for b in seed.get('batch', []))} "
         f"(size <= {ctx.max_tasks}, budget {seed.get('run_limit')} batches)"
@@ -119,19 +136,18 @@ def _confirm(ctx: LoopContext, seed: LoopState, yes: bool) -> None:
         raise SystemExit(0)
 
 
-def cmd_harness_run(
+def _run_one_feature(
     settings: Settings,
-    feature: str | None,
+    project: HarnessProject,
+    feat: Feature,
     max_tasks: int,
     max_batches: int,
-    path: str | None,
     yes: bool,
-    dispatch: Callable[[str], str] | None = None,
-    review: Callable[[str], ReviewVerdict] | None = None,
-) -> None:
-    """Phase 2: the full feature loop — batches, hard gates, human gates."""
-    project = HarnessProject.detect(Path(path) if path else None)
-    feat = _select_feature(project, feature)
+    dispatch: Callable[[str], str] | None,
+    review: Callable[[str], ReviewVerdict] | None,
+    spec: Callable[[str], str] | None,
+) -> bool:
+    """Run one feature to its next stopping point; True when it finalized."""
     ctx = make_context(
         project,
         settings,
@@ -140,6 +156,7 @@ def cmd_harness_run(
         max_batches=max_batches,
         dispatch=dispatch,
         review=review,
+        spec=spec,
     )
     tracer = get_tracer(settings)
     with loop_session(project.root) as saver, tracer.span(
@@ -161,6 +178,41 @@ def cmd_harness_run(
             _confirm(ctx, seed, yes)
             out = graph.invoke(seed, cfg)
     _print_result(ctx, out)
+    return bool(isinstance(out, dict) and out.get("finalized"))
+
+
+def cmd_harness_run(
+    settings: Settings,
+    feature: str | None,
+    max_tasks: int,
+    max_batches: int,
+    features: int,
+    path: str | None,
+    yes: bool,
+    dispatch: Callable[[str], str] | None = None,
+    review: Callable[[str], ReviewVerdict] | None = None,
+    spec: Callable[[str], str] | None = None,
+) -> None:
+    """Phase 3: the feature queue — spec gate, batches, hard gates, human gates.
+
+    One invocation processes up to `features` features, one `in_progress` at a
+    time: it stops at each human gate (the process parks there via the
+    checkpointer) and after finalize picks the next `pending` feature.
+    """
+    budget = features if feature else max(1, features)
+    done = 0
+    while done < budget:
+        project = HarnessProject.detect(Path(path) if path else None)
+        feat = _select_feature(project, feature)
+        finalized = _run_one_feature(
+            settings, project, feat, max_tasks, max_batches, yes, dispatch, review, spec
+        )
+        done += 1
+        if feature:
+            break  # explicit --feature: exactly one, even if it just finished
+        if not finalized:
+            print(f"\nqueue: '{feat.name}' waits at a human gate — stopping here")
+            break
 
 
 def cmd_harness_gate(
@@ -169,6 +221,9 @@ def cmd_harness_gate(
     comments: str,
     feature: str | None,
     path: str | None,
+    dispatch: Callable[[str], str] | None = None,
+    review: Callable[[str], ReviewVerdict] | None = None,
+    spec: Callable[[str], str] | None = None,
 ) -> None:
     """Resume a parked human gate: approve continues, reject turns back."""
     project = HarnessProject.detect(Path(path) if path else None)
@@ -176,7 +231,7 @@ def cmd_harness_gate(
     candidates = [
         f
         for f in project.feature_list.features
-        if f.status in ("in_progress", "blocked")
+        if f.status in ("in_progress", "blocked", "spec_ready")
         and (worktrees / f.name).is_dir()
         and (feature is None or f.name == feature)
     ]
@@ -191,7 +246,14 @@ def cmd_harness_gate(
     ):
         parked: list[tuple[LoopContext, Any]] = []
         for feat in candidates:
-            ctx = make_context(project, settings, feat.name)
+            ctx = make_context(
+                project,
+                settings,
+                feat.name,
+                dispatch=dispatch,
+                review=review,
+                spec=spec,
+            )
             graph = build_loop_graph(ctx, saver)
             snap = graph.get_state({"configurable": {"thread_id": feat.name}})
             if pending_interrupt(snap):
@@ -235,6 +297,11 @@ def _print_gate(ctx: LoopContext, payload: Any) -> None:
         )
         print("  approve → buildwright harness approve [comments]")
         print('  reject  → buildwright harness reject "what to change"')
+    elif gate == "spec":
+        print(f"\n[spec gate] {ctx.feature.name} — {ctx.feature.title}")
+        print(f"  spec trio at harness/specs/{ctx.feature.name}/ (read it yourself)")
+        print("  approve → buildwright harness approve [comments]")
+        print('  reject  → buildwright harness reject "what to change in the spec"')
     elif gate == "parked":
         print(f"\n[parked] {ctx.feature.name} is blocked")
         print(f"  reason: {payload.get('reason', '?')}")
@@ -287,12 +354,18 @@ def main(argv: list[str] | None = None) -> None:
         "path", nargs="?", default=None, help="project root (default: cwd)"
     )
     run = harness_sub.add_parser(
-        "run", help="run the feature loop: batches -> hard gates -> review -> human gate"
+        "run", help="run the feature queue: spec gate -> batches -> gates -> human gate"
     )
-    run.add_argument("--feature", default=None, help="feature name (default: first in_progress)")
+    run.add_argument("--feature", default=None, help="feature name (default: first in_progress/pending)")
     run.add_argument("--max-tasks", type=int, default=3, help="batch size cap (1-4)")
     run.add_argument(
         "--max-batches", type=int, default=10, help="batch budget for this invocation"
+    )
+    run.add_argument(
+        "--features",
+        type=int,
+        default=1,
+        help="how many features to process in this invocation (default 1)",
     )
     run.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     run.add_argument("path", nargs="?", default=None, help="project root (default: cwd)")
@@ -330,6 +403,7 @@ def main(argv: list[str] | None = None) -> None:
                     args.feature,
                     args.max_tasks,
                     args.max_batches,
+                    args.features,
                     args.path,
                     args.yes,
                 )

@@ -18,6 +18,7 @@ from __future__ import annotations
 import getpass
 import hashlib
 import json
+import re
 import subprocess
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -48,6 +49,7 @@ from .runtime import (
     tool_list_dir,
     tool_read_file,
     tool_run_command,
+    tool_write_file,
 )
 
 DEFAULT_MAX_TASKS = 3
@@ -56,8 +58,9 @@ MAX_BATCH_ATTEMPTS = 4  # dispatches on the same batch without progress → park
 MAX_GATE_CYCLES = 3  # consecutive failures of one gate → park
 MAX_REVIEW_ROUNDS = 2  # CHANGES_REQUESTED in a row → park blocked
 MAX_STALLS = 2  # consecutive stalls → fresh agent instance (restart)
+MAX_SPEC_ROUNDS = 2  # spec-gate rejections in a row → park blocked
 
-LOOP_CAP_KEYS = ("max_batch_attempts", "max_gate_cycles", "max_review_rounds")
+LOOP_CAP_KEYS = ("max_batch_attempts", "max_gate_cycles", "max_review_rounds", "max_spec_rounds")
 
 
 class LoopState(TypedDict, total=False):
@@ -75,6 +78,8 @@ class LoopState(TypedDict, total=False):
     restarts: int
     gate_fails: dict[str, int]  # consecutive failures per gate
     review_rounds: int
+    spec_rounds: int  # consecutive spec-gate rejections
+    spec_approved: bool  # spec gate passed (skip re-authoring on resume)
     batches_done: int
     verdict: str
     park_reason: str
@@ -147,8 +152,10 @@ class LoopContext:
     max_batch_attempts: int = MAX_BATCH_ATTEMPTS
     max_gate_cycles: int = MAX_GATE_CYCLES
     max_review_rounds: int = MAX_REVIEW_ROUNDS
+    max_spec_rounds: int = MAX_SPEC_ROUNDS
     dispatch: Callable[[str], str] | None = None
     review: Callable[[str], ReviewVerdict] | None = None
+    spec: Callable[[str], str] | None = None
 
     def run_dispatch(self, prompt: str) -> str:
         """One dispatch = one fresh agent instance (no shared session)."""
@@ -157,6 +164,10 @@ class LoopContext:
 
     def run_review(self, prompt: str) -> ReviewVerdict:
         fn = self.review if self.review is not None else _default_review(self)
+        return fn(prompt)
+
+    def run_spec(self, prompt: str) -> str:
+        fn = self.spec if self.spec is not None else _default_spec(self)
         return fn(prompt)
 
 
@@ -169,6 +180,7 @@ def make_context(
     max_batches: int = DEFAULT_MAX_BATCHES,
     dispatch: Callable[[str], str] | None = None,
     review: Callable[[str], ReviewVerdict] | None = None,
+    spec: Callable[[str], str] | None = None,
 ) -> LoopContext:
     """Resolve the feature, (re)create its worktree and load runtime caps (D1)."""
     feat = next((f for f in project.feature_list.features if f.name == feature_name), None)
@@ -190,6 +202,7 @@ def make_context(
         **_loop_caps(project.root),
         dispatch=dispatch,
         review=review,
+        spec=spec,
     )
 
 
@@ -213,6 +226,55 @@ def _default_dispatch(ctx: LoopContext) -> Callable[[str], str]:
         return agent.run_sync(prompt, deps=ctx.sandbox).output
 
     return dispatch
+
+
+SPEC_INSTRUCTIONS = """You are the spec-author agent of a harness-initialized project.
+You write the spec trio for ONE feature, following docs/specs.md (Spec Driven
+Development). You never touch src/ or tests/ — only the spec files.
+
+Write exactly these files inside harness/specs/<feature>/ :
+1. requirements.md — EARS notation. One `R<n>` per requirement (R1, R2, …),
+   each a single SHALL statement, stable ids, no should/may. End with a
+   Traceability section: a markdown table with one row per requirement
+   (`| R<n> | | | pending |`), cells filled in later by the implementer.
+2. design.md — context, approach, files to create/modify, test strategy.
+   Keep it short: only decisions a stranger could not reinvent.
+3. tasks.md — 2–6 `T<n>` checkboxes, each `- [ ] T<n>: <what> (refs R<a>, R<b>)`.
+   Every requirement must be referenced by at least one task; every task must
+   be small enough for one batch (a change plus its tests).
+
+Hard rules: requirements come from the feature's acceptance criteria — do not
+invent scope. Use the write_file tool for each file; verify nothing else.
+Reply DONE when the three files are written."""
+
+
+def _default_spec(ctx: LoopContext) -> Callable[[str], str]:
+    """Spec-author: planner-routed agent with file tools (writes only specs)."""
+
+    def spec(prompt: str) -> str:
+        model = ctx.registry.build(ctx.settings.role_model("planner"))
+        agent: Agent[Sandbox, str] = Agent(
+            model, deps_type=Sandbox, instructions=SPEC_INSTRUCTIONS
+        )
+
+        @agent.tool
+        def read_file(run_ctx: RunContext[Sandbox], path: str) -> str:
+            """Read a file from the worktree."""
+            return tool_read_file(run_ctx.deps, path)
+
+        @agent.tool
+        def write_file(run_ctx: RunContext[Sandbox], path: str, content: str) -> str:
+            """Create or overwrite a file in the worktree."""
+            return tool_write_file(run_ctx.deps, path, content)
+
+        @agent.tool
+        def list_dir(run_ctx: RunContext[Sandbox], path: str = ".") -> str:
+            """List a directory of the worktree."""
+            return tool_list_dir(run_ctx.deps, path)
+
+        return agent.run_sync(prompt, deps=ctx.sandbox).output
+
+    return spec
 
 
 def _default_review(ctx: LoopContext) -> Callable[[str], ReviewVerdict]:
@@ -627,6 +689,150 @@ def run_audit_gate(ctx: LoopContext) -> GateOutcome:
     return GateOutcome(True, "", "audit: " + " | ".join(done))
 
 
+# ---------- spec phase (pending → spec_ready → in_progress) ----------
+
+
+def verify_spec(ctx: LoopContext) -> tuple[bool, str]:
+    """The spec trio exists and parses: requirements with R ids, tasks with T ids."""
+    base = ctx.worktree / "harness" / "specs" / ctx.feature.name
+    missing = [
+        name
+        for name in ("requirements.md", "design.md", "tasks.md")
+        if not (base / name).is_file()
+    ]
+    if missing:
+        return False, f"missing spec files: {', '.join(missing)}"
+    if not _read_tasks(ctx):
+        return False, "tasks.md has no `- [ ] T<n>:` tasks"
+    requirements = (base / "requirements.md").read_text(encoding="utf-8")
+    if not re.search(r"\bR\d+\b", requirements):
+        return False, "requirements.md has no R<n> requirements"
+    return True, ""
+
+
+def _spec_prompt(ctx: LoopContext, feedback: str) -> str:
+    feat = ctx.feature
+    acceptance = "\n".join(f"- {a}" for a in feat.acceptance)
+    prompt = (
+        f"Write the spec trio for feature '{feat.name}' — {feat.title}.\n"
+        f"\nDescription:\n{feat.description}\n"
+        f"\nAcceptance criteria:\n{acceptance}\n"
+    )
+    if feedback:
+        prompt += f"\nThe human rejected the previous spec:\n{feedback}\nRevise it.\n"
+    return prompt
+
+
+def _spec_node(ctx: LoopContext) -> LoopNode:
+    """pending → spec_author → verify → spec_gate. Already in_progress → skip."""
+
+    def node(state: LoopState) -> Command:
+        if ctx.feature.status == "in_progress":
+            # phase-2 entry: the spec was approved interactively before the run
+            return Command(goto="implement_batch", update={"spec_approved": True})
+        # a stall re-dispatch opens with what was missing (state-borne feedback)
+        out = ctx.run_spec(_spec_prompt(ctx, state.get("dispatch_prompt", "")))
+        log = [
+            *state.get("log", []),
+            f"spec: authored ({len(out)} chars)",
+            *([state["dispatch_prompt"]] if state.get("dispatch_prompt") else []),
+        ]
+        ok, reason = verify_spec(ctx)
+        if not ok:
+            # stall protocol: same dispatch again, opened with what was missing
+            attempts = state.get("batch_attempts", 0) + 1
+            if attempts >= ctx.max_batch_attempts:
+                return Command(
+                    goto="park",
+                    update={
+                        "park_reason": f"spec incomplete {attempts}× in a row: {reason}",
+                        "park_target": "spec_phase",
+                        "log": [*log, f"spec: INCOMPLETE — {reason}"],
+                    },
+                )
+            return Command(
+                goto="spec_phase",
+                update={
+                    "batch_attempts": attempts,
+                    "dispatch_prompt": f"Nothing was written: {reason}. Create the "
+                    "spec files now.",
+                    "log": [*log, f"spec: INCOMPLETE — {reason}"],
+                },
+            )
+        set_feature_status(ctx.project.root, ctx.feature.name, "spec_ready")
+        _commit_main_status(ctx.project.root, ctx.feature.name, "spec_ready")
+        return Command(
+            goto="spec_gate",
+            update={
+                "batch_attempts": 0,
+                "dispatch_prompt": "",
+                "log": [*log, "spec: verified → spec_ready"],
+            },
+        )
+
+    return node
+
+
+def _spec_gate_node(ctx: LoopContext) -> LoopNode:
+    """Human gate on the spec: approve → in_progress → implement_batch."""
+
+    def node(state: LoopState) -> Command:
+        answer = interrupt(
+            {
+                "gate": "spec",
+                "prompt": (
+                    f"{ctx.feature.name} — {ctx.feature.title}: spec trio written to "
+                    f"harness/specs/{ctx.feature.name}/. Read it, then approve to "
+                    "start implementation or reject with changes for the spec-author."
+                ),
+                "summary": {"feature": ctx.feature.name, "rounds": state.get("spec_rounds", 0)},
+            }
+        )
+        decision, comments = _decision(answer)
+        log = [*state.get("log", []), f"spec gate: {decision}"]
+        if decision == "approve":
+            set_feature_status(ctx.project.root, ctx.feature.name, "in_progress")
+            _commit_main_status(ctx.project.root, ctx.feature.name, "in_progress")
+            batch = next_batch(_read_tasks(ctx), ctx.max_tasks)
+            if not batch:
+                return Command(
+                    goto="park",
+                    update={
+                        "park_reason": (
+                            "spec approved but tasks.md has no pending tasks — "
+                            "fix it and approve again"
+                        ),
+                        "park_target": "spec_phase",
+                        "log": [*log, "spec gate: no pending tasks after approval"],
+                    },
+                )
+            return Command(
+                goto="implement_batch",
+                update={
+                    "spec_approved": True,
+                    "spec_rounds": 0,
+                    "batch": [t.task_id for t in batch],
+                    "log": log,
+                },
+            )
+        rounds = state.get("spec_rounds", 0) + 1
+        log = [*log, f"spec gate: rejected (round {rounds})"]
+        update: LoopState = {"spec_rounds": rounds, "log": log}
+        if rounds >= ctx.max_spec_rounds:
+            update["park_reason"] = (
+                f"spec rejected {rounds}× — human gate (revise harness/specs/"
+                f"{ctx.feature.name}/ yourself, then approve)"
+            )
+            update["park_target"] = "spec_phase"
+            return Command(goto="park", update=update)
+        update["dispatch_prompt"] = (
+            f"Spec rejected by the human (round {rounds}):\n{comments or '(no details)'}"
+        )
+        return Command(goto="spec_phase", update=update)
+
+    return node
+
+
 # ---------- nodes ----------
 
 
@@ -913,7 +1119,10 @@ def _park_node(ctx: LoopContext) -> LoopNode:
         decision, comments = _decision(answer)
         log = [*state.get("log", []), f"human gate: {decision} ({reason})"]
         if decision == "approve":
-            _commit_main_status(ctx.project.root, ctx.feature.name, "in_progress")
+            # a spec-phase park resumes as pending (the spec is re-authored and
+            # re-gated); implementation parks resume as in_progress
+            resume_status = "pending" if target == "spec_phase" else "in_progress"
+            _commit_main_status(ctx.project.root, ctx.feature.name, resume_status)
             update: LoopState = {
                 "park_reason": "",
                 "park_target": "",
@@ -921,9 +1130,10 @@ def _park_node(ctx: LoopContext) -> LoopNode:
                 "batch_attempts": 0,
                 "gate_fails": {},
                 "review_rounds": 0,
+                "spec_rounds": 0,  # human intervention = progress; caps count streaks
                 "log": log,
             }
-            if comments:
+            if comments and target != "spec_phase":
                 update["dispatch_prompt"] = f"Human resume note: {comments}"
             return Command(goto=target or "implement_batch", update=update)
         log.append("aborted by human — feature left blocked")
@@ -967,11 +1177,14 @@ def build_loop_graph(
     parallel and every node would race to write the same state keys. The happy
     path, for readers, is:
 
-        implement_batch -> verify -> init_gate -> advance_batch -> reviewer
-          -> traceability_gate -> audit_gate -> completion_gate -> finalize
+        spec_phase -> spec_gate ⏈ -> implement_batch -> verify -> init_gate
+          -> advance_batch -> reviewer -> traceability_gate -> audit_gate
+          -> completion_gate ⏈ -> finalize
 
     with `verify`/gates looping back to `implement_batch` on failure and any
     unrecoverable condition routing to `park` (a human gate via `interrupt()`).
+    For an `in_progress` feature, `spec_phase` skips straight to
+    `implement_batch` (the spec was approved before the run).
     """
     graph: StateGraph[LoopState] = StateGraph(LoopState)
     graph.add_node("implement_batch", _implement_node(ctx))
@@ -992,9 +1205,13 @@ def build_loop_graph(
     graph.add_node("completion_gate", _completion_node(ctx))
     graph.add_node("park", _park_node(ctx))
     graph.add_node("finalize", _finalize_node(ctx))
+    graph.add_node("spec_phase", _spec_node(ctx))
+    graph.add_node("spec_gate", _spec_gate_node(ctx))
 
     # The single static edge: entry. Every other hop is a Command(goto=...).
-    graph.add_edge(START, "implement_batch")
+    # `spec_phase` routes straight to `implement_batch` for in_progress features
+    # (phase-2 behavior) and authors the spec first for pending ones (phase 3).
+    graph.add_edge(START, "spec_phase")
     return graph.compile(checkpointer=checkpointer)
 
 
@@ -1019,13 +1236,19 @@ def pending_interrupt(snap: StateSnapshot) -> bool:
 
 
 def initial_seed(ctx: LoopContext) -> LoopState:
-    """Fresh-run state: the first pending batch of the worktree's tasks.md."""
-    batch = next_batch(_read_tasks(ctx), ctx.max_tasks)
-    if not batch:
-        raise RuntimeError(f"feature '{ctx.feature.name}' has no pending tasks")
+    """Fresh-run state. `in_progress` features start at their first pending
+    batch; `pending` features start at the spec phase (the first batch is
+    picked when the spec gate approves, from the tasks.md just authored)."""
+    if ctx.feature.status == "in_progress":
+        batch = next_batch(_read_tasks(ctx), ctx.max_tasks)
+        if not batch:
+            raise RuntimeError(f"feature '{ctx.feature.name}' has no pending tasks")
+        batch_ids = [t.task_id for t in batch]
+    else:
+        batch_ids = []
     return {
         "feature": ctx.feature.name,
-        "batch": [t.task_id for t in batch],
+        "batch": batch_ids,
         "log": [],
         "dispatches": 0,
         "batch_attempts": 0,
@@ -1034,6 +1257,7 @@ def initial_seed(ctx: LoopContext) -> LoopState:
         "restarts": 0,
         "gate_fails": {},
         "review_rounds": 0,
+        "spec_rounds": 0,
         "batches_done": 0,
     }
 

@@ -85,22 +85,31 @@ In a project initialized with [harness](https://github.com/jordimarsal/harness):
 
 ```bash
 buildwright harness status                          # board + planned routing (read-only)
-buildwright harness run                             # the FULL feature loop (see below)
+buildwright harness run                             # the feature queue (see below)
 buildwright harness run --feature f3_dashboard      # specific feature
+buildwright harness run --features 3                # up to 3 features this invocation
 buildwright harness approve "lgtm"                  # resume a parked gate: approve
 buildwright harness reject  "add tests for R1"      # resume a parked gate: reject
 ```
 
 - `status` parses and schema-validates `harness/feature_list.json` (protocol v1)
   and shows the board plus which model each role would use.
-- `run` is **the full feature loop** (phase 2) — the graph *is* the leader. One
-  feature runs batch after batch inside an isolated **git worktree**
+- `run` is **the feature queue** (phase 3) — the graph *is* the leader. A
+  `pending` feature gets its spec authored first (spec-author writes
+  `harness/specs/<name>/{requirements,design,tasks}.md`, board flips to
+  `spec_ready`) and stops at a **spec gate**: you read the trio and
+  `approve` (→ `in_progress`, implementation starts) or `reject` with comments
+  (→ the spec-author reworks; two rejections in a row park the feature). An
+  `in_progress` feature skips straight to implementation. After `finalize` the
+  queue picks the next `pending` feature — up to `--features N` per invocation,
+  one `in_progress` at a time. One feature runs batch after batch inside an
+  isolated **git worktree**
   (`.buildwright/`, locally excluded), each batch being the next pending slice of
   `tasks.md` (capped at 4, harness discipline):
 
   ```
-  implement_batch → verify → init_gate → advance_batch → reviewer
-                    → traceability_gate → audit_gate → completion_gate → finalize
+  spec_phase → spec_gate ⏈ → implement_batch → verify → init_gate → advance_batch
+              → reviewer → traceability_gate → audit_gate → completion_gate ⏈ → finalize
   ```
 
   - **verify** re-reads `tasks.md` and diffs the worktree — a chat claim is not

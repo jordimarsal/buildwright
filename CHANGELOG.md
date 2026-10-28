@@ -5,6 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Phase 3 — the feature queue.** `harness run` no longer requires a
+  pre-approved spec: a `pending` feature is routed through a new
+  `spec_phase → spec_gate` pair of nodes — a planner-routed spec-author writes
+  the trio (`requirements.md` EARS + traceability table, `design.md`,
+  `tasks.md`), the runtime verifies it on disk (three files, ≥1 `R<n>`,
+  ≥1 task) and flips the board to `spec_ready`; the human gate then approves
+  (→ `in_progress`, the loop picks the first batch from the fresh `tasks.md`)
+  or rejects with comments (→ the spec-author reworks; `max_spec_rounds`
+  consecutive rejections park the feature, and a park resume goes back through
+  `pending`). After `finalize` the queue picks the next `pending` feature —
+  `--features N` budgets how many features one invocation processes, one
+  `in_progress` at a time; a feature waiting at a human gate stops the queue
+  (resume it with `approve`/`reject`). Board flips during the spec phase are
+  committed to `main` immediately, keeping `finalize`'s clean-main gate honest.
+  `spec_ready` features now appear as gate-resume candidates.
+
 ## [0.4.3] - 2026-10-28
 
 ### Fixed
