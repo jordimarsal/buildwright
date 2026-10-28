@@ -377,10 +377,26 @@ def test_run_trace_gate_skips_and_fails(tmp_path: Path):
     tools = ctx.worktree / "harness" / "tools"
     tools.mkdir(parents=True, exist_ok=True)
     script = tools / "check-traceability.py"
+    # `--all` green but the feature being completed uncovered -> gate fails
+    script.write_text(
+        "import sys\n"
+        "args = sys.argv[1:]\n"
+        "open('ran.txt', 'a').write(' '.join(args) + '\\n')\n"
+        "KNOWN_FLAGS = ('--all', '--feature')\n"
+        "raise SystemExit(1 if '--feature' in args else 0)\n",
+        encoding="utf-8",
+    )
+    fail = run_trace_gate(ctx)
+    assert not fail.ok and "traceability-feature gate FAILED" in fail.feedback
+    ran = (ctx.worktree / "ran.txt").read_text()
+    assert "--all" in ran and f"--feature {ctx.feature.name}" in ran
+
+    # `--all` red -> the first pass fails and carries the feedback
     script.write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
     fail = run_trace_gate(ctx)
     assert not fail.ok and "traceability gate FAILED" in fail.feedback
 
+    # old harness standard without --feature -> degrade to the --all pass
     script.write_text("print('all covered')\n", encoding="utf-8")
     assert run_trace_gate(ctx).ok
 

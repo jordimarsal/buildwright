@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The traceability gate now also checks the feature being completed.**
+  `run_trace_gate` only ran `check-traceability.py --all`, and `--all` gates
+  the `done` features — the feature under completion is still `in_progress`
+  (it flips to `done` at finalize), so its traceability table was never
+  mechanically verified and relied solely on the reviewer. The gate now runs a
+  second pass, `check-traceability.py --feature <name>`. Harness standards
+  whose script predates the `--feature` flag degrade to the `--all` pass
+  (the flag is probed in the script text, since unknown arguments exit 2).
+
 ## [0.4.2] - 2026-10-28
 
 ### Added

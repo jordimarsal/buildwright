@@ -553,11 +553,35 @@ def run_init_gate(ctx: LoopContext) -> GateOutcome:
 
 
 def run_trace_gate(ctx: LoopContext) -> GateOutcome:
+    """`--all` gates the `done` features only, so the feature being completed
+    (still `in_progress`: it flips to `done` at finalize) would never be
+    mechanically checked — its table would rely solely on the reviewer. Run a
+    second pass for it. Older harness standards without `--feature` degrade
+    to the `--all` pass (feature name is schema-validated `^[a-z0-9_]+$`, so
+    interpolating it into the command is safe)."""
     if not (ctx.worktree / "harness" / "tools" / "check-traceability.py").is_file():
         return GateOutcome(True, "", "check-traceability.py not present — gate skipped")
-    return _run_gate(
-        ctx, "traceability", "python3 harness/tools/check-traceability.py --all"
-    )
+    checks: list[tuple[str, str]] = [
+        ("traceability", "python3 harness/tools/check-traceability.py --all")
+    ]
+    # Old harness standards have no `--feature` flag: probe the script text
+    # (its parser lists known flags) instead of running it, since it exits 2
+    # for any unknown argument — indistinguishable from a real gap.
+    script = ctx.worktree / "harness" / "tools" / "check-traceability.py"
+    if "--feature" in script.read_text(encoding="utf-8"):
+        feature_cmd = (
+            f"python3 harness/tools/check-traceability.py --feature {ctx.feature.name}"
+        )
+        checks.append(("traceability-feature", feature_cmd))
+    done: list[str] = []
+    for name, command in checks:
+        outcome = _run_gate(ctx, name, command)
+        if not outcome.ok:
+            return GateOutcome(
+                False, outcome.feedback, " | ".join([*done, outcome.log])
+            )
+        done.append(outcome.log)
+    return GateOutcome(True, "", " | ".join(done))
 
 
 def run_audit_gate(ctx: LoopContext) -> GateOutcome:
