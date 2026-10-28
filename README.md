@@ -121,3 +121,7 @@ uv run pytest        # offline: pydantic-ai's TestModel, zero network
 4. Offline evals in CI rule; Langfuse is production monitoring.
 5. Each piece joins when it has a real trigger (fallbacks→LiteLLM,
    non-linear flow→LangGraph is already in).
+
+## Changelog
+
+Release history lives in [CHANGELOG.md](CHANGELOG.md).
