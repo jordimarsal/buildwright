@@ -668,6 +668,31 @@ def test_retro_line_counts():
     assert retro_line({"dispatches": 5, "stalls_total": 2, "restarts": 1}) == (
         "retro: 5 dispatches · 2 stalls · 1 restarts"
     )
+    # cost appears only when the feature actually spent something
+    assert retro_line({"dispatches": 1, "cost_usd": 0.01234}) == (
+        "retro: 1 dispatches · 0 stalls · 0 restarts · $0.0123"
+    )
+
+
+def test_record_usage_prices_and_unpriced(tmp_path: Path):
+    root = make_repo(tmp_path)
+    ctx = ctx_for(root, FakeDispatch(root), ScriptedReview(APPROVED))
+
+    class _Usage:
+        def __init__(self, i: int, o: int):
+            self.input_tokens = i
+            self.output_tokens = o
+
+    # unpriced model: no fake $0.00 spent, delta stays 0
+    assert ctx.record_usage("worker", "remote/zai-glm-flash", _Usage(1000, 500)) == 0.0
+
+    # priced model: 0.5M in + 0.2M out at 2.0/4.0 $/Mtok = 1.8 USD
+    ctx.registry._specs["remote/zai-glm-flash"].input_price = 2.0
+    ctx.registry._specs["remote/zai-glm-flash"].output_price = 4.0
+    delta = ctx.record_usage("worker", "remote/zai-glm-flash", _Usage(500_000, 200_000))
+    assert delta == ctx.last_cost == 1.8
+    assert ctx.record_usage("worker", "remote/zai-glm-flash", _Usage(0, 0)) == 0.0
+
 
 
 # ---------- CLI ----------
