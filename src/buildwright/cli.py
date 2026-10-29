@@ -8,6 +8,7 @@ from typing import Any
 
 from langgraph.types import Command, RunnableConfig
 
+from . import runlog
 from .agents import Wright
 from .config import ROLES, Settings
 from .graph import build_graph
@@ -199,10 +200,17 @@ def _run_one_feature(
             )
         if snap.next:
             print("resuming an interrupted run (previous invocation did not finish)")
+            runlog.emit(f"run: resuming interrupted run — {feat.name}", project.root)
             out: dict[str, Any] = graph.invoke(None, cfg)
         else:
             seed = prepare_seed(ctx, dict(snap.values) if snap.values else None)
             _confirm(ctx, seed, yes)
+            runlog.emit(
+                f"run: {feat.name} — planner {settings.role_model('planner')} · "
+                f"worker {settings.role_model('worker')} · "
+                f"reviewer {settings.role_model('reviewer')}",
+                project.root,
+            )
             out = graph.invoke(seed, cfg)
     _print_result(ctx, out)
     return bool(isinstance(out, dict) and out.get("finalized"))
@@ -370,12 +378,21 @@ def _print_gate(ctx: LoopContext, payload: Any) -> None:
         print(f"\n[spec gate] {ctx.feature.name} — {ctx.feature.title}")
         print(f"  spec trio at harness/specs/{ctx.feature.name}/ (read it yourself)")
         print("  approve → buildwright harness approve [comments]")
+        runlog.emit(
+            f"run: {ctx.feature.name} parked at spec gate — review the trio, "
+            "then approve/reject",
+            ctx.project.root,
+        )
         print('  reject  → buildwright harness reject "what to change in the spec"')
     elif gate == "parked":
         print(f"\n[parked] {ctx.feature.name} is blocked")
         print(f"  reason: {payload.get('reason', '?')}")
         print("  approve → buildwright harness approve   (resumes the loop)")
         print('  reject  → buildwright harness reject    (leaves it blocked)')
+        runlog.emit(
+            f"run: {ctx.feature.name} parked — {payload.get('reason', '?')}",
+            ctx.project.root,
+        )
     else:
         print(f"\n[parked] unknown gate {gate!r}")
 
@@ -396,8 +413,10 @@ def _print_result(ctx: LoopContext, out: dict[str, Any]) -> None:
             "status done"
         )
         print(f"  {retro_line(state)}")
+        runlog.emit(f"run: {ctx.feature.name} done — merged to main", ctx.project.root)
     else:
         print("\n[stopped] run limit reached — re-run `buildwright harness run` to continue")
+        runlog.emit("run: stopped — run limit reached", ctx.project.root)
         _print_stats(state)
 
 

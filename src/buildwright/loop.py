@@ -36,6 +36,7 @@ from langgraph.types import Command, StateSnapshot, interrupt
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 
+from . import runlog
 from .config import Settings
 from .harness import Feature, FeatureList, HarnessProject
 from .registry import ModelRegistry
@@ -262,8 +263,10 @@ def _default_dispatch(ctx: LoopContext) -> Callable[[str], str]:
         model_id = ctx.settings.role_model("worker")
         model = ctx.registry.build(model_id)
         agent = build_implementer(model, ctx.sandbox)
+        runlog.emit(f"worker ({model_id}): working…", ctx.project.root)
         result = agent.run_sync(prompt, deps=ctx.sandbox)
         ctx.record_usage("worker", model_id, result.usage)
+        runlog.emit(f"worker → {_short(result.output)}", ctx.project.root)
         return result.output
 
     return dispatch
@@ -298,6 +301,7 @@ def _default_spec(ctx: LoopContext) -> Callable[[str], str]:
         agent: Agent[Sandbox, str] = Agent(
             model, deps_type=Sandbox, instructions=SPEC_INSTRUCTIONS
         )
+        runlog.emit(f"spec-author ({model_id}): writing the trio…", ctx.project.root)
 
         @agent.tool
         def read_file(run_ctx: RunContext[Sandbox], path: str) -> str:
@@ -316,6 +320,7 @@ def _default_spec(ctx: LoopContext) -> Callable[[str], str]:
 
         result = agent.run_sync(prompt, deps=ctx.sandbox)
         ctx.record_usage("planner", model_id, result.usage)
+        runlog.emit(f"spec-author → {len(result.output)} chars", ctx.project.root)
         return result.output
 
     return spec
@@ -348,6 +353,7 @@ def _default_gauntlet(ctx: LoopContext) -> Callable[[str], GauntletVerdict]:
             deps_type=Sandbox,
             instructions=GAUNTLET_INSTRUCTIONS,
         )
+        runlog.emit(f"gauntlet reviewer ({model_id}): G2+G3 pass…", ctx.project.root)
 
         @agent.tool
         def read_file(run_ctx: RunContext[Sandbox], path: str) -> str:
@@ -366,6 +372,11 @@ def _default_gauntlet(ctx: LoopContext) -> Callable[[str], GauntletVerdict]:
 
         result = agent.run_sync(prompt, deps=ctx.sandbox)
         ctx.record_usage("reviewer", model_id, result.usage)
+        runlog.emit(
+            f"gauntlet → {result.output.verdict} "
+            f"({len(result.output.g2_findings)} G2 findings)",
+            ctx.project.root,
+        )
         return result.output
 
     return gauntlet
@@ -381,6 +392,7 @@ def _default_review(ctx: LoopContext) -> Callable[[str], ReviewVerdict]:
             deps_type=Sandbox,
             instructions=REVIEW_INSTRUCTIONS,
         )
+        runlog.emit(f"reviewer ({model_id}): reviewing…", ctx.project.root)
 
         @agent.tool
         def read_file(run_ctx: RunContext[Sandbox], path: str) -> str:
@@ -399,6 +411,11 @@ def _default_review(ctx: LoopContext) -> Callable[[str], ReviewVerdict]:
 
         result = agent.run_sync(prompt, deps=ctx.sandbox)
         ctx.record_usage("reviewer", model_id, result.usage)
+        runlog.emit(
+            f"reviewer → {result.output.verdict} "
+            f"({len(result.output.required_changes)} required changes)",
+            ctx.project.root,
+        )
         return result.output
 
     return review
@@ -971,9 +988,17 @@ def _implement_node(ctx: LoopContext) -> LoopNode:
         by_id = {t.task_id: t for t in _read_tasks(ctx)}
         batch = [by_id[i] for i in batch_ids if i in by_id]
         prompt = _dispatch_prompt(ctx, state, batch)
+        dispatches = state.get("dispatches", 0) + 1
+        runlog.emit(
+            f"dispatch #{dispatches} [{', '.join(batch_ids)}] → "
+            f"{ctx.settings.role_model('worker')}",
+            ctx.project.root,
+        )
         fingerprint = worktree_fingerprint(ctx.worktree)  # captured BEFORE the dispatch
         output = ctx.run_dispatch(prompt)
-        dispatches = state.get("dispatches", 0) + 1
+        runlog.emit(
+            f"dispatch #{dispatches} → {_short(output)}", ctx.project.root
+        )
         return Command(
             goto="verify",
             update={
@@ -1048,6 +1073,7 @@ def _verify_node(ctx: LoopContext) -> LoopNode:
         if len(marked) != len(batch):
             missing = [t.task_id for t in batch if not t.done]
             log.append(f"verify: incomplete — {', '.join(missing)} not marked on disk")
+            runlog.emit(log[-1], ctx.project.root)
             return Command(
                 goto="implement_batch",
                 update={
@@ -1061,6 +1087,7 @@ def _verify_node(ctx: LoopContext) -> LoopNode:
             )
 
         log.append(f"verify: [{', '.join(batch_ids)}] marked on disk, worktree changed")
+        runlog.emit(log[-1], ctx.project.root)
         return Command(
             goto="init_gate",
             update={"stalls": 0, "batch_attempts": 0, "log": log},
@@ -1077,6 +1104,7 @@ def _gate_node(
 ) -> LoopNode:
     def node(state: LoopState) -> Command:
         outcome = run(ctx)
+        runlog.emit(outcome.log, ctx.project.root)
         fails = dict(state.get("gate_fails", {}))
         log = [*state.get("log", []), outcome.log]
         if outcome.ok:
