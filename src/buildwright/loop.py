@@ -87,6 +87,7 @@ class LoopState(TypedDict, total=False):
     spec_approved: bool  # spec gate passed (skip re-authoring on resume)
     gauntlet_rounds: int  # consecutive gauntlet rejections
     batches_done: int
+    cost_usd: float  # accumulated agent cost (0 when models are unpriced)
     verdict: str
     park_reason: str
     park_target: str
@@ -172,6 +173,21 @@ class LoopContext:
     review: Callable[[str], ReviewVerdict] | None = None
     spec: Callable[[str], str] | None = None
     gauntlet: Callable[[str], GauntletVerdict] | None = None
+    last_cost: float = 0.0  # cost delta of the last agent call (0 when unpriced)
+
+    def record_usage(self, role: str, model_id: str, usage: Any) -> float:
+        """Fold one call's token usage into last_cost (phase-4 cost feedback).
+
+        Returns the delta in USD; 0.0 when the registry entry carries no
+        prices — an unpriced model must not silently report $0.00 spent.
+        """
+        spec = self.registry.spec(model_id)
+        cost = spec.cost_usd(
+            getattr(usage, "input_tokens", 0) or 0,
+            getattr(usage, "output_tokens", 0) or 0,
+        )
+        self.last_cost = cost or 0.0
+        return self.last_cost
 
     def run_dispatch(self, prompt: str) -> str:
         """One dispatch = one fresh agent instance (no shared session)."""
@@ -243,9 +259,12 @@ def _loop_caps(root: Path) -> dict[str, int]:
 
 def _default_dispatch(ctx: LoopContext) -> Callable[[str], str]:
     def dispatch(prompt: str) -> str:
-        model = ctx.registry.build(ctx.settings.role_model("worker"))
+        model_id = ctx.settings.role_model("worker")
+        model = ctx.registry.build(model_id)
         agent = build_implementer(model, ctx.sandbox)
-        return agent.run_sync(prompt, deps=ctx.sandbox).output
+        result = agent.run_sync(prompt, deps=ctx.sandbox)
+        ctx.record_usage("worker", model_id, result.usage)
+        return result.output
 
     return dispatch
 
@@ -274,7 +293,8 @@ def _default_spec(ctx: LoopContext) -> Callable[[str], str]:
     """Spec-author: planner-routed agent with file tools (writes only specs)."""
 
     def spec(prompt: str) -> str:
-        model = ctx.registry.build(ctx.settings.role_model("planner"))
+        model_id = ctx.settings.role_model("planner")
+        model = ctx.registry.build(model_id)
         agent: Agent[Sandbox, str] = Agent(
             model, deps_type=Sandbox, instructions=SPEC_INSTRUCTIONS
         )
@@ -294,7 +314,9 @@ def _default_spec(ctx: LoopContext) -> Callable[[str], str]:
             """List a directory of the worktree."""
             return tool_list_dir(run_ctx.deps, path)
 
-        return agent.run_sync(prompt, deps=ctx.sandbox).output
+        result = agent.run_sync(prompt, deps=ctx.sandbox)
+        ctx.record_usage("planner", model_id, result.usage)
+        return result.output
 
     return spec
 
@@ -318,7 +340,8 @@ traffic on this diff."""
 
 def _default_gauntlet(ctx: LoopContext) -> Callable[[str], GauntletVerdict]:
     def gauntlet(prompt: str) -> GauntletVerdict:
-        model = ctx.registry.build(ctx.settings.role_model("reviewer"))
+        model_id = ctx.settings.role_model("reviewer")
+        model = ctx.registry.build(model_id)
         agent: Agent[Sandbox, GauntletVerdict] = Agent(
             model,
             output_type=GauntletVerdict,
@@ -341,14 +364,17 @@ def _default_gauntlet(ctx: LoopContext) -> Callable[[str], GauntletVerdict]:
             """Run an allowlisted command (tests, gates) in the worktree."""
             return tool_run_command(run_ctx.deps, command)
 
-        return agent.run_sync(prompt, deps=ctx.sandbox).output
+        result = agent.run_sync(prompt, deps=ctx.sandbox)
+        ctx.record_usage("reviewer", model_id, result.usage)
+        return result.output
 
     return gauntlet
 
 
 def _default_review(ctx: LoopContext) -> Callable[[str], ReviewVerdict]:
     def review(prompt: str) -> ReviewVerdict:
-        model = ctx.registry.build(ctx.settings.role_model("reviewer"))
+        model_id = ctx.settings.role_model("reviewer")
+        model = ctx.registry.build(model_id)
         agent: Agent[Sandbox, ReviewVerdict] = Agent(
             model,
             output_type=ReviewVerdict,
@@ -371,7 +397,9 @@ def _default_review(ctx: LoopContext) -> Callable[[str], ReviewVerdict]:
             """Run an allowlisted command (tests, gates) in the worktree."""
             return tool_run_command(run_ctx.deps, command)
 
-        return agent.run_sync(prompt, deps=ctx.sandbox).output
+        result = agent.run_sync(prompt, deps=ctx.sandbox)
+        ctx.record_usage("reviewer", model_id, result.usage)
+        return result.output
 
     return review
 
@@ -434,11 +462,15 @@ def set_feature_status(root: Path, feature_name: str, status: str) -> None:
 
 
 def retro_line(state: Mapping[str, Any]) -> str:
-    """The protocol's retro line, machine-generated."""
-    return (
+    """The protocol's retro line, machine-generated (cost when priced)."""
+    line = (
         f"retro: {state.get('dispatches', 0)} dispatches · "
         f"{state.get('stalls_total', 0)} stalls · {state.get('restarts', 0)} restarts"
     )
+    cost = state.get("cost_usd") or 0.0
+    if cost > 0:
+        line += f" · ${cost:.4f}"
+    return line
 
 
 class FinalizeError(RuntimeError):
@@ -805,6 +837,7 @@ def _spec_node(ctx: LoopContext) -> LoopNode:
             return Command(goto="implement_batch", update={"spec_approved": True})
         # a stall re-dispatch opens with what was missing (state-borne feedback)
         out = ctx.run_spec(_spec_prompt(ctx, state.get("dispatch_prompt", "")))
+        cost = round(state.get("cost_usd", 0.0) + ctx.last_cost, 6)
         log = [
             *state.get("log", []),
             f"spec: authored ({len(out)} chars)",
@@ -820,6 +853,7 @@ def _spec_node(ctx: LoopContext) -> LoopNode:
                     update={
                         "park_reason": f"spec incomplete {attempts}× in a row: {reason}",
                         "park_target": "spec_phase",
+                        "cost_usd": cost,
                         "log": [*log, f"spec: INCOMPLETE — {reason}"],
                     },
                 )
@@ -829,6 +863,7 @@ def _spec_node(ctx: LoopContext) -> LoopNode:
                     "batch_attempts": attempts,
                     "dispatch_prompt": f"Nothing was written: {reason}. Create the "
                     "spec files now.",
+                    "cost_usd": cost,
                     "log": [*log, f"spec: INCOMPLETE — {reason}"],
                 },
             )
@@ -839,6 +874,7 @@ def _spec_node(ctx: LoopContext) -> LoopNode:
             update={
                 "batch_attempts": 0,
                 "dispatch_prompt": "",
+                "cost_usd": cost,
                 "log": [*log, "spec: verified → spec_ready"],
             },
         )
@@ -945,6 +981,7 @@ def _implement_node(ctx: LoopContext) -> LoopNode:
                 "batch_attempts": attempts + 1,
                 "fingerprint": fingerprint,
                 "dispatch_prompt": "",
+                "cost_usd": round(state.get("cost_usd", 0.0) + ctx.last_cost, 6),
                 "log": [
                     *state.get("log", []),
                     f"dispatch #{dispatches} [{', '.join(batch_ids)}] → {_short(output)}",
@@ -1096,6 +1133,7 @@ def _gauntlet_node(ctx: LoopContext) -> LoopNode:
             f"'{ctx.feature.name}' — {ctx.feature.title}. G1 result: "
             f"{'PASS' if g1.ok else 'FAIL'}."
         )
+        cost = round(state.get("cost_usd", 0.0) + ctx.last_cost, 6)
 
         # G4 — evidence: report on disk with the four PASS lines
         report = ctx.worktree / "harness" / "progress" / f"gauntlet_{ctx.feature.name}.md"
@@ -1130,11 +1168,20 @@ def _gauntlet_node(ctx: LoopContext) -> LoopNode:
             fails.pop("gauntlet", None)
             return Command(
                 goto="completion_gate",
-                update={"gate_fails": fails, "gauntlet_rounds": 0, "log": log},
+                update={
+                    "gate_fails": fails,
+                    "gauntlet_rounds": 0,
+                    "cost_usd": cost,
+                    "log": log,
+                },
             )
 
         rounds = state.get("gauntlet_rounds", 0) + 1
-        update: LoopState = {"gauntlet_rounds": rounds, "log": log}
+        update: LoopState = {
+            "gauntlet_rounds": rounds,
+            "cost_usd": cost,
+            "log": log,
+        }
         findings = (
             "\n".join(f"- {f}" for f in verdict.g2_findings) or verdict.summary or "(none)"
         )
@@ -1191,7 +1238,11 @@ def _reviewer_node(ctx: LoopContext) -> LoopNode:
             *state.get("log", []),
             f"review: {verdict.verdict} → {path.relative_to(ctx.worktree)}",
         ]
-        update: LoopState = {"verdict": verdict.verdict, "log": log}
+        update: LoopState = {
+            "verdict": verdict.verdict,
+            "log": log,
+            "cost_usd": round(state.get("cost_usd", 0.0) + ctx.last_cost, 6),
+        }
         if verdict.verdict == "APPROVED":
             update["review_rounds"] = 0
             return Command(goto="traceability_gate", update=update)
@@ -1425,6 +1476,7 @@ def initial_seed(ctx: LoopContext) -> LoopState:
         "spec_rounds": 0,
         "gauntlet_rounds": 0,
         "batches_done": 0,
+        "cost_usd": 0.0,
     }
 
 

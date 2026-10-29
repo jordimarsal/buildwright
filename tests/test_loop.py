@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -112,6 +113,11 @@ def make_repo(
     (spec / "design.md").write_text("# Design\n", encoding="utf-8")
     rows = "\n".join(f"- [ ] {tasks[i]}: {tasks[i + 1]}" for i in range(0, len(tasks), 2))
     (spec / "tasks.md").write_text(f"# Tasks\n\n{rows}\n", encoding="utf-8")
+    tests = root / "tests"
+    tests.mkdir(parents=True, exist_ok=True)
+    (tests / "test_hub.py").write_text(
+        "def test_hub_exists():\n    assert True\n", encoding="utf-8"
+    )
     (root / "harness" / "init.sh").write_text(init_sh, encoding="utf-8")
     if gauntlet_sh is not None:
         tools = root / "harness" / "tools"
@@ -145,8 +151,21 @@ class FakeDispatch:
         # append the impl log — every dispatch must change the worktree
         log = self.worktree / "harness" / "progress" / f"impl_{self.feature}.md"
         log.parent.mkdir(parents=True, exist_ok=True)
+        table_needed = not log.exists() or "## Traceability" not in log.read_text(
+            encoding="utf-8"
+        )
         with log.open("a", encoding="utf-8") as fh:
             fh.write(f"\n## dispatch {self.calls}\ndid: {', '.join(batch)}\n")
+            if table_needed:
+                # the protocol's impl table (v1.1): files must carry their
+                # `feature:` attribute or the checker ignores them
+                fh.write(f"\nfeature: {self.feature}\n")
+                fh.write(
+                    "\n## Traceability\n"
+                    "| Requirement | Test(s) | Implementation file(s) | Status |\n"
+                    "|-------------|---------|------------------------|--------|\n"
+                    f"| R1 | test_hub_exists | src/impl_{batch[0] if batch else 'T1'}.py | done |\n"
+                )
         for tid in batch:
             src = self.worktree / "src" / f"impl_{tid}.py"
             src.parent.mkdir(parents=True, exist_ok=True)
@@ -768,6 +787,132 @@ def test_parallel_starts_both_features(tmp_path: Path, capsys):
     statuses = {f["name"]: f["status"] for f in fl["features"]}
     assert statuses["f2_hub"] == "in_progress"  # parked at completion gate
     assert statuses["f0_new"] == "spec_ready"  # parked at spec gate
+
+
+def test_real_trace_script_accepts_runtime_artifacts(tmp_path: Path):
+    """Cross-repo regression: harness-standard's real parser must accept the
+    artifacts the runtime generates (spec trios + impl traceability tables) —
+    both gate passes (`--all` and `--feature`) come out green."""
+    root = make_repo(tmp_path)
+    # a done sibling feature, as on any real board (--all gates done features)
+    spec = root / "harness" / "specs" / "f1_gateway"
+    spec.mkdir(parents=True)
+    (spec / "requirements.md").write_text("R1: the gateway encodes records\n", encoding="utf-8")
+    (spec / "design.md").write_text("# Design\n", encoding="utf-8")
+    (spec / "tasks.md").write_text("- [x] T1: encode (refs R1)\n", encoding="utf-8")
+    (root / "tests" / "test_gateway.py").write_text(
+        "def test_encode_record():\n    assert True\n", encoding="utf-8"
+    )
+    prog = root / "harness" / "progress"
+    prog.mkdir(parents=True, exist_ok=True)
+    (prog / "impl_f1_gateway.md").write_text(
+        "# impl f1_gateway\nfeature: f1_gateway\n\n## Traceability\n"
+        "| Requirement | Test(s) | Implementation file(s) | Status |\n"
+        "|-------------|---------|------------------------|--------|\n"
+        "| R1 | test_encode_record | src/gateway.py | done |\n",
+        encoding="utf-8",
+    )
+    # f2_hub's own table (in a real run the implementer writes it before the gate)
+    (prog / "impl_f2_hub.md").write_text(
+        "# impl f2_hub\nfeature: f2_hub\n\n## Traceability\n"
+        "| Requirement | Test(s) | Implementation file(s) | Status |\n"
+        "|-------------|---------|------------------------|--------|\n"
+        "| R1 | test_hub_exists | src/hub.py | done |\n",
+        encoding="utf-8",
+    )
+    fl_path = root / "harness" / "feature_list.json"
+    fl = json.loads(fl_path.read_text(encoding="utf-8"))
+    fl["features"].insert(
+        0,
+        {
+            "id": 0,
+            "name": "f1_gateway",
+            "title": "Gateway",
+            "description": "encodes records",
+            "acceptance": ["A1: it encodes"],
+            "status": "done",
+        },
+    )
+    fl_path.write_text(json.dumps(fl, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tools = root / "harness" / "tools"
+    tools.mkdir(parents=True, exist_ok=True)
+    shutil.copy(
+        Path(__file__).parent / "fixtures" / "check-traceability.py",
+        tools / "check-traceability.py",
+    )
+    git(root, "add", "-A")
+    git(root, "commit", "-m", "done sibling + vendored real traceability script")
+
+    ctx = ctx_for(root, FakeDispatch(root), ScriptedReview(APPROVED))
+    outcome = run_trace_gate(ctx)
+    assert outcome.ok, outcome.log
+    assert "traceability: green" in outcome.log
+    assert "traceability-feature: green" in outcome.log
+
+
+LIVE_HARNESS_STANDARD = Path(__file__).parent.parent.parent / "harness-standard"
+
+
+@pytest.mark.skipif(
+    not (LIVE_HARNESS_STANDARD / "templates" / "tools" / "check-traceability.py").is_file(),
+    reason="harness-standard checkout not present (CI stays hermetic)",
+)
+def test_live_harness_standard_script_accepts_runtime_artifacts(tmp_path: Path):
+    """Same contract as above but against the LIVE harness-standard template —
+    catches protocol drift the moment it lands on the other repo."""
+    root = make_repo(tmp_path)
+    spec = root / "harness" / "specs" / "f1_gateway"
+    spec.mkdir(parents=True)
+    (spec / "requirements.md").write_text("R1: the gateway encodes records\n", encoding="utf-8")
+    (spec / "design.md").write_text("# Design\n", encoding="utf-8")
+    (spec / "tasks.md").write_text("- [x] T1: encode (refs R1)\n", encoding="utf-8")
+    (root / "tests" / "test_gateway.py").write_text(
+        "def test_encode_record():\n    assert True\n", encoding="utf-8"
+    )
+    prog = root / "harness" / "progress"
+    prog.mkdir(parents=True, exist_ok=True)
+    (prog / "impl_f1_gateway.md").write_text(
+        "# impl f1_gateway\nfeature: f1_gateway\n\n## Traceability\n"
+        "| Requirement | Test(s) | Implementation file(s) | Status |\n"
+        "|-------------|---------|------------------------|--------|\n"
+        "| R1 | test_encode_record | src/gateway.py | done |\n",
+        encoding="utf-8",
+    )
+    # f2_hub's own table (in a real run the implementer writes it before the gate)
+    (prog / "impl_f2_hub.md").write_text(
+        "# impl f2_hub\nfeature: f2_hub\n\n## Traceability\n"
+        "| Requirement | Test(s) | Implementation file(s) | Status |\n"
+        "|-------------|---------|------------------------|--------|\n"
+        "| R1 | test_hub_exists | src/hub.py | done |\n",
+        encoding="utf-8",
+    )
+    fl_path = root / "harness" / "feature_list.json"
+    fl = json.loads(fl_path.read_text(encoding="utf-8"))
+    fl["features"].insert(
+        0,
+        {
+            "id": 0,
+            "name": "f1_gateway",
+            "title": "Gateway",
+            "description": "encodes records",
+            "acceptance": ["A1: it encodes"],
+            "status": "done",
+        },
+    )
+    fl_path.write_text(json.dumps(fl, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tools = root / "harness" / "tools"
+    tools.mkdir(parents=True, exist_ok=True)
+    shutil.copy(
+        LIVE_HARNESS_STANDARD / "templates" / "tools" / "check-traceability.py",
+        tools / "check-traceability.py",
+    )
+    git(root, "add", "-A")
+    git(root, "commit", "-m", "done sibling + live harness-standard script")
+
+    ctx = ctx_for(root, FakeDispatch(root), ScriptedReview(APPROVED))
+    outcome = run_trace_gate(ctx)
+    assert outcome.ok, outcome.log
+    assert "traceability-feature: green" in outcome.log
 
 
 def test_cli_queue_picks_pending_after_finalize(tmp_path: Path, capsys):

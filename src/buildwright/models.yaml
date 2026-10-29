@@ -1,6 +1,11 @@
 # Model registry: local and remote models in one place.
 # Agents never pick a model themselves: role -> id is defined in config
 # (BW_ROLE_* or the project's runtime.yaml)
+#
+# Optional pricing (phase 4): add `input_price` / `output_price` (USD per
+# million tokens) to an entry and the loop accumulates real spend — the
+# finalize retro line reports it as `retro: … · $0.0123`. Entries without
+# prices simply never report cost.
 models:
   # ---------------- local ----------------
   - id: local/qwen3

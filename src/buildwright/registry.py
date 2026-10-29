@@ -22,6 +22,16 @@ class ModelSpec(BaseModel):
     model: str | None = None  # "wire" name; defaults to the id without the prefix
     api_key_env: str | None = None
     context_window: int | None = None
+    input_price: float | None = None  # USD per million input tokens
+    output_price: float | None = None  # USD per million output tokens
+
+    def cost_usd(self, input_tokens: int, output_tokens: int) -> float | None:
+        """Cost of one call, or None when the entry carries no prices."""
+        if self.input_price is None and self.output_price is None:
+            return None
+        return input_tokens / 1e6 * (self.input_price or 0.0) + output_tokens / 1e6 * (
+            self.output_price or 0.0
+        )
 
 
 class ModelRegistry:

@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Phase 4 — cost feedback.** `models.yaml` entries accept optional
+  `input_price` / `output_price` (USD per million tokens). Every agent call
+  (implementer, reviewer, spec-author, gauntlet) records its token usage and
+  the feature accumulates real spend in the persisted state; `finalize`'s
+  retro line reports it — `retro: 1 dispatches · 0 stalls · 0 restarts ·
+  $0.0123`. Entries without prices report nothing (an unpriced model must not
+  silently claim $0.00).
+- **Cross-repo protocol regression.** harness-standard's real
+  `check-traceability.py` is vendored under `tests/fixtures/` (provenance
+  dated) and a test runs both gate passes (`--all`, `--feature`) with it
+  against runtime-generated spec trios and impl tables — if either repo
+  changes the contract, this fails. A second variant runs the live
+  `harness-standard` checkout when present (skipped in CI).
+
 ## [0.5.0] - 2026-10-28
 
 ### Added

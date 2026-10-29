@@ -65,3 +65,5 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+# vendored third-party scripts must stay byte-identical to upstream
+extend-exclude = ["tests/fixtures"]

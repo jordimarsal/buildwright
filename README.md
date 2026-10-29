@@ -142,6 +142,11 @@ buildwright harness reject  "add tests for R1"      # resume a parked gate: reje
     `retro:` line to `history.md`; `reject` turns the feature back to the
     implementer with your comments. On approval the feature's worktree is
     removed and its merged branch deleted — a re-run starts fresh off `main`.
+  - **cost feedback (phase 4)**: when your `models.yaml` declares
+    `input_price` / `output_price` (USD per million tokens), every agent call
+    is priced and the finalize retro line reports the feature's spend:
+    `retro: 1 dispatches · 0 stalls · 0 restarts · $0.0123`. Unpriced models
+    never report cost.
 - Command allowlist defaults are built in; extend or retime via an optional
   project-owned `harness/runtime.yaml` (also `max_batch_attempts`,
   `max_gate_cycles`, `max_review_rounds`):
