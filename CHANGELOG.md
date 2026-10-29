@@ -16,12 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retro line reports it — `retro: 1 dispatches · 0 stalls · 0 restarts ·
   $0.0123`. Entries without prices report nothing (an unpriced model must not
   silently claim $0.00).
-- **Cross-repo protocol regression.** harness-standard's real
+- **Cross-repo protocol regression.** harness's real
   `check-traceability.py` is vendored under `tests/fixtures/` (provenance
   dated) and a test runs both gate passes (`--all`, `--feature`) with it
   against runtime-generated spec trios and impl tables — if either repo
   changes the contract, this fails. A second variant runs the live
-  `harness-standard` checkout when present (skipped in CI).
+  `harness` checkout when present (skipped in CI).
 
 ## [0.5.0] - 2026-10-28
 

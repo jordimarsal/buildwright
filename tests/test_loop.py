@@ -815,7 +815,7 @@ def test_parallel_starts_both_features(tmp_path: Path, capsys):
 
 
 def test_real_trace_script_accepts_runtime_artifacts(tmp_path: Path):
-    """Cross-repo regression: harness-standard's real parser must accept the
+    """Cross-repo regression: harness's real parser must accept the
     artifacts the runtime generates (spec trios + impl traceability tables) —
     both gate passes (`--all` and `--feature`) come out green."""
     root = make_repo(tmp_path)
@@ -875,15 +875,15 @@ def test_real_trace_script_accepts_runtime_artifacts(tmp_path: Path):
     assert "traceability-feature: green" in outcome.log
 
 
-LIVE_HARNESS_STANDARD = Path(__file__).parent.parent.parent / "harness-standard"
+LIVE_HARNESS = Path(__file__).parent.parent.parent / "harness"
 
 
 @pytest.mark.skipif(
-    not (LIVE_HARNESS_STANDARD / "templates" / "tools" / "check-traceability.py").is_file(),
-    reason="harness-standard checkout not present (CI stays hermetic)",
+    not (LIVE_HARNESS / "templates" / "tools" / "check-traceability.py").is_file(),
+    reason="harness checkout not present (CI stays hermetic)",
 )
-def test_live_harness_standard_script_accepts_runtime_artifacts(tmp_path: Path):
-    """Same contract as above but against the LIVE harness-standard template —
+def test_live_harness_script_accepts_runtime_artifacts(tmp_path: Path):
+    """Same contract as above but against the LIVE harness template —
     catches protocol drift the moment it lands on the other repo."""
     root = make_repo(tmp_path)
     spec = root / "harness" / "specs" / "f1_gateway"
@@ -928,11 +928,11 @@ def test_live_harness_standard_script_accepts_runtime_artifacts(tmp_path: Path):
     tools = root / "harness" / "tools"
     tools.mkdir(parents=True, exist_ok=True)
     shutil.copy(
-        LIVE_HARNESS_STANDARD / "templates" / "tools" / "check-traceability.py",
+        LIVE_HARNESS / "templates" / "tools" / "check-traceability.py",
         tools / "check-traceability.py",
     )
     git(root, "add", "-A")
-    git(root, "commit", "-m", "done sibling + live harness-standard script")
+    git(root, "commit", "-m", "done sibling + live harness script")
 
     ctx = ctx_for(root, FakeDispatch(root), ScriptedReview(APPROVED))
     outcome = run_trace_gate(ctx)
