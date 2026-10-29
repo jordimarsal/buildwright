@@ -115,6 +115,6 @@ def test_format_status_shows_board_and_planned_routing(tmp_path):
     assert "demo" in text
     assert "f1_core" in text and "f3_auth" in text
     assert "ROLE -> MODEL" in text
-    assert "local/qwen3" in text
-    # worker -> remote/gpt-4o-mini is not in the small registry: flagged, not fatal
+    assert "local/llamacpp" in text
+    # worker -> remote/zai-glm-flash is not in the small registry: flagged, not fatal
     assert "MISSING-IN-REGISTRY" in text

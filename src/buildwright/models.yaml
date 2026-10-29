@@ -15,10 +15,11 @@ models:
     model: qwen3:8b
 
   - id: local/llamacpp
-    label: llama.cpp server (GGUF)
+    label: Qwen3-4B Q4_K_M (llama.cpp CUDA, RTX 4070)
     kind: local
-    base_url: http://localhost:8080/v1
-    model: local-model
+    base_url: http://172.25.0.1:8080/v1
+    model: qwen3-4b
+    context_window: 16384
 
   # ---------------- remote ----------------
   - id: remote/gpt-4o-mini
@@ -42,13 +43,12 @@ models:
     model: claude-sonnet-4-5
     api_key_env: ANTHROPIC_API_KEY
 
-  # --------- Z.ai / Zhipu (GLM) — small and cheap; coding-plan keys go to ---------
-  # the /api/coding/paas/v4 base_url instead, or inference fails with error 1113
-  # ("insufficient balance") even though /models lists fine.
+  # --------- Z.ai / Zhipu (GLM) — coding-plan key, /api/coding/paas/v4 ---------
+  # Verified: the standard /api/paas/v4 returns 429 with a coding-plan key.
   - id: remote/zai-glm-flash
-    label: GLM-5.3-flash (Z.ai)
+    label: GLM-5.3-flash (Z.ai coding plan)
     kind: remote
-    base_url: https://api.z.ai/api/paas/v4
+    base_url: https://api.z.ai/api/coding/paas/v4
     model: glm-5.3-flash
     api_key_env: ZAI_API_KEY
 

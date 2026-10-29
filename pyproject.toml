@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "buildwright"
-version = "0.5.0"
+version = "0.6.0"
 description = "Per-agent model routing for AI agents: LangGraph orchestration, PydanticAI agents, LiteLLM-ready registry, Langfuse tracing"
 readme = "README.md"
 license = "MIT"

@@ -57,9 +57,9 @@ class Settings(BaseSettings):
     models_file: Path = Field(default_factory=default_models_file)
 
     # role -> registry id (models.yaml)
-    role_planner: str = "local/qwen3"
-    role_worker: str = "remote/gpt-4o-mini"
-    role_reviewer: str = "local/qwen3"
+    role_planner: str = "remote/zai-glm-flash"
+    role_worker: str = "local/llamacpp"
+    role_reviewer: str = "remote/zai-glm-flash"
 
     # Langfuse: no keys -> tracing disabled (NullTracer)
     langfuse_public_key: str | None = None
