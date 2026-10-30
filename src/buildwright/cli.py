@@ -441,6 +441,7 @@ def main(argv: list[str] | None = None) -> None:
     harness = sub.add_parser(
         "harness",
         help="inspect/execute a harness-initialized project",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             "Spec-driven feature loop. run: the spec trio is authored and parked at\n"
             "the spec gate (you review it); approved, it implements batch by batch\n"
