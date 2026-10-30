@@ -10,6 +10,7 @@ from buildwright.runtime import (
     next_batch,
     parse_tasks,
     resolve_in_sandbox,
+    sync_worktree,
     tool_edit_file,
     tool_list_dir,
     tool_read_file,
@@ -156,3 +157,36 @@ def test_reused_worktree_syncs_with_main(harness_repo: Path):
         check=False,
     )
     assert behind.stdout.strip() == "0"
+
+
+def test_sync_worktree_discards_a_dirty_board(harness_repo: Path):
+    """A runtime-owned status flip in the worktree must not block the sync.
+
+    The board is main's truth: the loop flips status on main (committed) and
+    mirrors it in the worktree; a local mirror edit must be discarded, not
+    fatal — this is exactly how approve runs got stuck in practice.
+    """
+    wt = create_worktree(harness_repo, "f1_api")
+
+    # main moves on after the branch point (a board rewrite, committed there)
+    board_main = harness_repo / "harness" / "feature_list.json"
+    board_main.write_text(
+        board_main.read_text(encoding="utf-8").replace('"name": "p"', '"name": "p-main"'),
+        encoding="utf-8",
+    )
+    git(harness_repo, "add", "-A")
+    git(harness_repo, "commit", "-m", "chore(board): main rewrites the board")
+
+    # the worktree mirror is dirty: the loop rewrote it without committing
+    board_wt = wt / "harness" / "feature_list.json"
+    board_wt.write_text(
+        board_wt.read_text(encoding="utf-8").replace('"name": "p"', '"name": "p-worktree-dirty"'),
+        encoding="utf-8",
+    )
+
+    sync_worktree(harness_repo, wt)  # must not raise
+
+    # the local flip was discarded and main's state reached the worktree
+    merged = board_wt.read_text(encoding="utf-8")
+    assert "p-main" in merged
+    assert "p-worktree-dirty" not in merged

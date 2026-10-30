@@ -299,11 +299,21 @@ def sync_worktree(root: Path, worktree: Path) -> None:
     spec. Fast-forward when the branch has no commits of its own, merge when it
     does; a merge git refuses (local changes in the way) is raised instead of
     silently dispatching against a stale tree.
+
+    Exception: `harness/feature_list.json` is runtime-owned — main is its source
+    of truth and the worktree copy is a mirror the loop rewrites. A local flip
+    there is discarded before merging; otherwise the sync trips over the
+    runtime's own bookkeeping and the gate can never resume.
     """
     branch = _current_branch(worktree)
     main = _current_branch(root)
     if branch is None or main is None or main == branch:
         return
+    board = worktree / "harness" / "feature_list.json"
+    if board.is_file() and _git(
+        worktree, "status", "--porcelain", "--", "harness/feature_list.json"
+    ).stdout.strip():
+        _git(worktree, "checkout", "--", "harness/feature_list.json")
     if _git(worktree, "merge", "--ff-only", main).returncode == 0:
         return
     merge = _git(worktree, *GIT_IDENTITY, "merge", main)
