@@ -301,7 +301,8 @@ def cmd_harness_gate(
     spec: Callable[[str], str] | None = None,
     gauntlet: Callable[[str], GauntletVerdict] | None = None,
 ) -> None:
-    """Resume a parked human gate: approve continues, reject turns back."""
+    """Resume a parked gate: approve/fix continue (comments steer the
+    implementer), reject aborts (at the spec gate it re-authors instead)."""
     project = HarnessProject.detect(Path(path) if path else None)
     worktrees = project.root / ".buildwright" / "worktrees"
     candidates = [
@@ -374,6 +375,7 @@ def _print_gate(ctx: LoopContext, payload: Any) -> None:
         )
         print("  approve → buildwright harness approve [comments]")
         print('  reject  → buildwright harness reject "what to change"')
+        print('  fix     → buildwright harness fix "what to change"  (back to the implementer)')
     elif gate == "spec":
         print(f"\n[spec gate] {ctx.feature.name} — {ctx.feature.title}")
         print(f"  spec trio at harness/specs/{ctx.feature.name}/ (read it yourself)")
@@ -384,11 +386,16 @@ def _print_gate(ctx: LoopContext, payload: Any) -> None:
             ctx.project.root,
         )
         print('  reject  → buildwright harness reject "what to change in the spec"')
+        print('  fix     → buildwright harness fix "what to change"  (= reject + re-author)')
     elif gate == "parked":
         print(f"\n[parked] {ctx.feature.name} is blocked")
         print(f"  reason: {payload.get('reason', '?')}")
         print("  approve → buildwright harness approve   (resumes the loop)")
         print('  reject  → buildwright harness reject    (leaves it blocked)')
+        print(
+            '  fix     → buildwright harness fix [comments]  '
+            '(comments go to the implementer; caps reset)'
+        )
         runlog.emit(
             f"run: {ctx.feature.name} parked — {payload.get('reason', '?')}",
             ctx.project.root,
@@ -432,7 +439,21 @@ def main(argv: list[str] | None = None) -> None:
     ask.add_argument("task")
 
     harness = sub.add_parser(
-        "harness", help="inspect/execute a harness-initialized project"
+        "harness",
+        help="inspect/execute a harness-initialized project",
+        description=(
+            "Spec-driven feature loop. run: the spec trio is authored and parked at\n"
+            "the spec gate (you review it); approved, it implements batch by batch\n"
+            "with hard gates (init.sh, traceability, audit), a reviewer verdict and\n"
+            "the adversarial gauntlet, ending at a completion gate you approve\n"
+            "(merge to main + APPROVAL + status done).\n\n"
+            "Parked gates are resumed with:\n"
+            "  approve  continue — optional comments steer the implementer\n"
+            "  fix      order a fix — comments (or the parked findings) are\n"
+            "           dispatched to the implementer; cycle caps reset\n"
+            "  reject   abort — leaves the feature blocked (at the spec gate:\n"
+            "           re-author with your comments)"
+        ),
     )
     harness_sub = harness.add_subparsers(dest="hcmd", required=True)
     status = harness_sub.add_parser(
@@ -459,20 +480,41 @@ def main(argv: list[str] | None = None) -> None:
     run.add_argument("path", nargs="?", default=None, help="project root (default: cwd)")
 
     approve = harness_sub.add_parser(
-        "approve", help="resume a parked human gate with approval"
+        "approve",
+        help="resume a parked gate — optional comments steer the implementer",
     )
-    approve.add_argument("comments", nargs="*", help="recorded in APPROVAL / passed on")
+    approve.add_argument(
+        "comments",
+        nargs="*",
+        help="steering note, passed to the implementer; recorded in APPROVAL",
+    )
     approve.add_argument("--feature", default=None, help="which parked feature (when several)")
     approve.add_argument("--path", default=None, help="project root (default: cwd)")
 
     reject = harness_sub.add_parser(
-        "reject", help="resume a parked human gate with changes requested"
+        "reject",
+        help="abort — leaves the feature blocked (spec gate: re-author with comments)",
     )
     reject.add_argument(
         "comments", nargs="+", help="what to change (fed back to the implementer)"
     )
     reject.add_argument("--feature", default=None, help="which parked feature (when several)")
     reject.add_argument("--path", default=None, help="project root (default: cwd)")
+
+    fix = harness_sub.add_parser(
+        "fix",
+        help=(
+            "resume a parked gate ordering a fix — comments go to the implementer; "
+            "no comments = fix the parked findings"
+        ),
+    )
+    fix.add_argument(
+        "comments",
+        nargs="*",
+        help="what to fix (default: the findings the park is about)",
+    )
+    fix.add_argument("--feature", default=None, help="which parked feature (when several)")
+    fix.add_argument("--path", default=None, help="project root (default: cwd)")
 
     args = parser.parse_args(argv)
     settings = Settings()
@@ -499,6 +541,14 @@ def main(argv: list[str] | None = None) -> None:
                 cmd_harness_gate(
                     settings,
                     "approve",
+                    " ".join(args.comments),
+                    args.feature,
+                    args.path,
+                )
+            elif args.hcmd == "fix":
+                cmd_harness_gate(
+                    settings,
+                    "fix",
                     " ".join(args.comments),
                     args.feature,
                     args.path,

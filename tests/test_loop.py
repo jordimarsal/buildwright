@@ -1001,3 +1001,58 @@ def test_cli_gate_without_worktree_errors(tmp_path: Path):
     root = make_repo(tmp_path)
     with pytest.raises(RuntimeError, match="no feature with a buildwright worktree"):
         cmd_harness_gate(Settings(), "approve", "", None, str(root))
+
+
+def test_gauntlet_park_fix_order_resumes_and_finalizes(tmp_path: Path):
+    """fix at a gauntlet park: the order reaches the implementer, caps reset."""
+    root = make_repo(
+        tmp_path, gauntlet_sh="#!/bin/bash\necho 'gauntlet: ok'\nexit 0\n"
+    )
+    gauntlet = ScriptedGauntlet(
+        GauntletVerdict(
+            verdict="REJECTED",
+            g2_findings=["overflow escapes the TaxonomyError contract"],
+            summary="round 1",
+        ),
+        GauntletVerdict(verdict="REJECTED", g2_findings=["still broken"], summary="round 2"),
+        GauntletVerdict(verdict="APPROVED", summary="fixed"),
+    )
+    dispatch = FakeDispatch(root)
+    ctx = ctx_for(root, dispatch, ScriptedReview(APPROVED), gauntlet=gauntlet)
+
+    out = invoke(ctx, prepare_seed(ctx, None))
+    payload = interrupt_payload(out)
+    assert payload["gate"] == "parked"
+    assert "gauntlet rejected" in payload["reason"]
+
+    out2 = resume(ctx, "fix", "guard the float conversion, add regressions")
+    # the fix order reached the implementer verbatim
+    assert any(
+        "Human fix order: guard the float conversion" in p for p in dispatch.prompts
+    )
+    # the gauntlet re-ran with reset caps and approved → completion gate
+    assert interrupt_payload(out2)["gate"] == "completion"
+
+    out3 = resume(ctx, "approve", "verified by hand")
+    assert isinstance(out3, dict) and out3["finalized"] is True
+
+
+def test_spec_gate_fix_reworks_the_spec(tmp_path: Path):
+    """fix at the spec gate behaves as reject-with-comments (re-author)."""
+    root = make_repo(tmp_path, queue=True)
+    spec = ScriptedSpec(root, "f0_new")
+    ctx = ctx_for(
+        root,
+        FakeDispatch(root, feature="f0_new"),
+        ScriptedReview(APPROVED),
+        spec=spec,
+        feature="f0_new",
+    )
+    cfg = cfg_for("f0_new")
+
+    out = invoke(ctx, prepare_seed(ctx, None), cfg)
+    assert interrupt_payload(out)["gate"] == "spec"
+
+    out2 = resume(ctx, "fix", "split R1 into two requirements", cfg)
+    assert interrupt_payload(out2)["gate"] == "spec"  # reworked, back at the gate
+    assert any("split R1" in p for p in spec.prompts)  # order reached the spec-author

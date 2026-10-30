@@ -915,6 +915,8 @@ def _spec_gate_node(ctx: LoopContext) -> LoopNode:
             }
         )
         decision, comments = _decision(answer)
+        if decision == "fix":  # a fix order at the spec gate = rejection with changes
+            decision = "reject"
         log = [*state.get("log", []), f"spec gate: {decision}"]
         if decision == "approve":
             set_feature_status(ctx.project.root, ctx.feature.name, "in_progress")
@@ -1333,6 +1335,11 @@ def _completion_node(ctx: LoopContext) -> LoopNode:
             goto="implement_batch",
             update={
                 "dispatch_prompt": (
+                    f"Human fix order at the completion gate: "
+                    f"{comments or '(no comments)'}"
+                )
+                if decision == "fix"
+                else (
                     f"Human rejected at the completion gate: "
                     f"{comments or '(no comments)'}"
                 ),
@@ -1361,7 +1368,7 @@ def _park_node(ctx: LoopContext) -> LoopNode:
         )
         decision, comments = _decision(answer)
         log = [*state.get("log", []), f"human gate: {decision} ({reason})"]
-        if decision == "approve":
+        if decision in ("approve", "fix"):
             # a spec-phase park resumes as pending (the spec is re-authored and
             # re-gated); implementation parks resume as in_progress
             resume_status = "pending" if target == "spec_phase" else "in_progress"
@@ -1376,7 +1383,12 @@ def _park_node(ctx: LoopContext) -> LoopNode:
                 "spec_rounds": 0,  # human intervention = progress; caps count streaks
                 "log": log,
             }
-            if comments and target != "spec_phase":
+            if decision == "fix":
+                # without comments keep the parked dispatch_prompt — at gauntlet
+                # parks it already carries the findings to fix
+                if comments and target != "spec_phase":
+                    update["dispatch_prompt"] = f"Human fix order: {comments}"
+            elif comments and target != "spec_phase":
                 update["dispatch_prompt"] = f"Human resume note: {comments}"
             return Command(goto=target or "implement_batch", update=update)
         log.append("aborted by human — feature left blocked")
