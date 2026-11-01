@@ -174,6 +174,7 @@ class LoopContext:
     review: Callable[[str], ReviewVerdict] | None = None
     spec: Callable[[str], str] | None = None
     gauntlet: Callable[[str], GauntletVerdict] | None = None
+    auto: bool = False  # auto-approve spec/completion gates; parks still interrupt
     last_cost: float = 0.0  # cost delta of the last agent call (0 when unpriced)
 
     def record_usage(self, role: str, model_id: str, usage: Any) -> float:
@@ -219,6 +220,7 @@ def make_context(
     review: Callable[[str], ReviewVerdict] | None = None,
     spec: Callable[[str], str] | None = None,
     gauntlet: Callable[[str], GauntletVerdict] | None = None,
+    auto: bool = False,
 ) -> LoopContext:
     """Resolve the feature, (re)create its worktree and load runtime caps (D1)."""
     feat = next((f for f in project.feature_list.features if f.name == feature_name), None)
@@ -242,6 +244,7 @@ def make_context(
         review=review,
         spec=spec,
         gauntlet=gauntlet,
+        auto=auto,
     )
 
 
@@ -903,17 +906,20 @@ def _spec_gate_node(ctx: LoopContext) -> LoopNode:
     """Human gate on the spec: approve → in_progress → implement_batch."""
 
     def node(state: LoopState) -> Command:
-        answer = interrupt(
-            {
-                "gate": "spec",
-                "prompt": (
-                    f"{ctx.feature.name} — {ctx.feature.title}: spec trio written to "
-                    f"harness/specs/{ctx.feature.name}/. Read it, then approve to "
-                    "start implementation or reject with changes for the spec-author."
-                ),
-                "summary": {"feature": ctx.feature.name, "rounds": state.get("spec_rounds", 0)},
-            }
-        )
+        if ctx.auto:
+            answer = {"decision": "approve", "comments": ""}
+        else:
+            answer = interrupt(
+                {
+                    "gate": "spec",
+                    "prompt": (
+                        f"{ctx.feature.name} — {ctx.feature.title}: spec trio written to "
+                        f"harness/specs/{ctx.feature.name}/. Read it, then approve to "
+                        "start implementation or reject with changes for the spec-author."
+                    ),
+                    "summary": {"feature": ctx.feature.name, "rounds": state.get("spec_rounds", 0)},
+                }
+            )
         decision, comments = _decision(answer)
         if decision == "fix":  # a fix order at the spec gate = rejection with changes
             decision = "reject"
@@ -1305,25 +1311,28 @@ def _decision(answer: Any) -> tuple[str, str]:
 
 def _completion_node(ctx: LoopContext) -> LoopNode:
     def node(state: LoopState) -> Command:
-        answer = interrupt(
-            {
-                "gate": "completion",
-                "prompt": (
-                    f"{ctx.feature.name} — {ctx.feature.title}: all tasks marked, "
-                    "hard gates green, reviewer APPROVED. Approve for completion "
-                    "(merge to main + APPROVAL + status done) or reject back to "
-                    "the implementer."
-                ),
-                "summary": {
-                    "feature": ctx.feature.name,
-                    "verdict": state.get("verdict", "?"),
-                    "batches": state.get("batches_done", 0),
-                    "dispatches": state.get("dispatches", 0),
-                    "stalls": state.get("stalls_total", 0),
-                    "restarts": state.get("restarts", 0),
-                },
-            }
-        )
+        if ctx.auto:
+            answer = {"decision": "approve", "comments": ""}
+        else:
+            answer = interrupt(
+                {
+                    "gate": "completion",
+                    "prompt": (
+                        f"{ctx.feature.name} — {ctx.feature.title}: all tasks marked, "
+                        "hard gates green, reviewer APPROVED. Approve for completion "
+                        "(merge to main + APPROVAL + status done) or reject back to "
+                        "the implementer."
+                    ),
+                    "summary": {
+                        "feature": ctx.feature.name,
+                        "verdict": state.get("verdict", "?"),
+                        "batches": state.get("batches_done", 0),
+                        "dispatches": state.get("dispatches", 0),
+                        "stalls": state.get("stalls_total", 0),
+                        "restarts": state.get("restarts", 0),
+                    },
+                }
+            )
         decision, comments = _decision(answer)
         log = [*state.get("log", []), f"completion gate: {decision}"]
         if decision == "approve":

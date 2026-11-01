@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+## [0.8.3] - 2026-11-01
+
+### Added
+
+- **Unattended mode.** `buildwright harness run --auto` auto-approves the
+  `spec_gate` and `completion_gate` (spec trio on disk + verify pass, then
+  merge + APPROVAL + status done) and walks every runnable feature until the
+  queue is empty; it still stops at `park` (cycle caps, stalls, gate
+  failures, review/gauntlet/spec rejections beyond their caps — the errors
+  the models cannot fix on their own). `--feature X --auto` scopes it to
+  one feature. Works in both sequential and parallel (`parallel: true`)
+  flows.
+
 - **Phase 4 — cost feedback.** `models.yaml` entries accept optional
   `input_price` / `output_price` (USD per million tokens). Every agent call
   (implementer, reviewer, spec-author, gauntlet) records its token usage and

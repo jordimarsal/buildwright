@@ -88,6 +88,8 @@ buildwright harness status                          # board + planned routing (r
 buildwright harness run                             # the feature queue (see below)
 buildwright harness run --feature f3_dashboard      # specific feature
 buildwright harness run --features 3                # up to 3 features this invocation
+buildwright harness run --auto                      # unattended: auto-approve spec/completion gates,
+                                                   # cover all runnable features; stop only at parks
 buildwright harness approve "lgtm"                  # resume a parked gate: approve
 buildwright harness reject  "add tests for R1"      # resume a parked gate: reject
 ```

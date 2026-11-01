@@ -173,6 +173,7 @@ def _run_one_feature(
     review: Callable[[str], ReviewVerdict] | None,
     spec: Callable[[str], str] | None,
     gauntlet: Callable[[str], GauntletVerdict] | None,
+    auto: bool = False,
 ) -> bool:
     """Run one feature to its next stopping point; True when it finalized."""
     ctx = make_context(
@@ -185,6 +186,7 @@ def _run_one_feature(
         review=review,
         spec=spec,
         gauntlet=gauntlet,
+        auto=auto,
     )
     tracer = get_tracer(settings)
     with loop_session(project.root) as saver, tracer.span(
@@ -204,7 +206,7 @@ def _run_one_feature(
             out: dict[str, Any] = graph.invoke(None, cfg)
         else:
             seed = prepare_seed(ctx, dict(snap.values) if snap.values else None)
-            _confirm(ctx, seed, yes)
+            _confirm(ctx, seed, yes or auto)
             runlog.emit(
                 f"run: {feat.name} — planner {settings.role_model('planner')} · "
                 f"worker {settings.role_model('worker')} · "
@@ -228,6 +230,7 @@ def cmd_harness_run(
     review: Callable[[str], ReviewVerdict] | None = None,
     spec: Callable[[str], str] | None = None,
     gauntlet: Callable[[str], GauntletVerdict] | None = None,
+    auto: bool = False,
 ) -> None:
     """Phase 3: the feature queue — spec gate, batches, hard gates, human gates.
 
@@ -236,25 +239,40 @@ def cmd_harness_run(
     `parallel: true` the selected features start together, one worktree each —
     main-repo mutations are serialized through MAIN_LOCK.
     """
-    project = HarnessProject.detect(Path(path) if path else None)
-    selected = _select_features(project, feature, max(1, features))
+    try:
+        project = HarnessProject.detect(Path(path) if path else None)
+        selected = _select_features(project, feature, max(1, features))
+    except RuntimeError as exc:
+        if auto:
+            print(f"queue: {exc}")
+            return
+        raise
 
     if len(selected) == 1 or not project.feature_list.project.parallel:
         done = 0
-        while done < max(1, features):
+        while True:
+            if not auto and done >= max(1, features):
+                break
             project = HarnessProject.detect(Path(path) if path else None)
-            (feat,) = _select_features(project, feature, 1)
+            try:
+                (feat,) = _select_features(project, feature, 1)
+            except RuntimeError as exc:
+                if auto:
+                    print(f"\nqueue: {exc}")
+                    break
+                raise
             finalized = _run_one_feature(
                 settings,
                 project,
                 feat,
                 max_tasks,
                 max_batches,
-                yes,
+                yes or auto,
                 dispatch,
                 review,
                 spec,
                 gauntlet,
+                auto=auto,
             )
             done += 1
             if feature:
@@ -267,27 +285,47 @@ def cmd_harness_run(
     # parallel: independent features, one thread each (one worktree per feature)
     from concurrent.futures import ThreadPoolExecutor
 
-    print(f"parallel: {len(selected)} features starting together")
-    with ThreadPoolExecutor(max_workers=len(selected)) as pool:
-        futures = {
-            pool.submit(
-                _run_one_feature,
-                settings,
-                project,
-                feat,
-                max_tasks,
-                max_batches,
-                yes,
-                dispatch,
-                review,
-                spec,
-                gauntlet,
-            ): feat
-            for feat in selected
-        }
-        for future, feat in futures.items():
-            if not future.result():
-                print(f"\nqueue: '{feat.name}' waits at a human gate — stopping here")
+    while True:
+        project = HarnessProject.detect(Path(path) if path else None)
+        try:
+            selected = _select_features(project, feature, max(1, features))
+        except RuntimeError as exc:
+            if auto:
+                print(f"\nqueue: {exc}")
+                break
+            raise
+        if not selected:
+            break
+        print(f"parallel: {len(selected)} features starting together")
+        with ThreadPoolExecutor(max_workers=len(selected)) as pool:
+            futures = {
+                pool.submit(
+                    _run_one_feature,
+                    settings,
+                    project,
+                    feat,
+                    max_tasks,
+                    max_batches,
+                    yes or auto,
+                    dispatch,
+                    review,
+                    spec,
+                    gauntlet,
+                    auto=auto,
+                ): feat
+                for feat in selected
+            }
+            parked = False
+            for future, feat in futures.items():
+                if not future.result():
+                    print(f"\nqueue: '{feat.name}' waits at a human gate — stopping here")
+                    parked = True
+        if feature:
+            break
+        if parked and not auto:
+            break
+        if not auto:
+            break
 
 
 def cmd_harness_gate(
@@ -478,6 +516,14 @@ def main(argv: list[str] | None = None) -> None:
         help="how many features to process in this invocation (default 1)",
     )
     run.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    run.add_argument(
+        "--auto",
+        action="store_true",
+        help=(
+            "run unattended: auto-approve spec and completion gates, cover all "
+            "runnable features; stop only at parks (errors the models cannot fix)"
+        ),
+    )
     run.add_argument("path", nargs="?", default=None, help="project root (default: cwd)")
 
     approve = harness_sub.add_parser(
@@ -537,6 +583,7 @@ def main(argv: list[str] | None = None) -> None:
                     args.features,
                     args.path,
                     args.yes,
+                    auto=args.auto,
                 )
             elif args.hcmd == "approve":
                 cmd_harness_gate(
