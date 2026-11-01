@@ -89,26 +89,25 @@ def _select_feature(project: HarnessProject, feature: str | None) -> Feature:
         if in_progress:
             feat = in_progress[0]
         else:
-            pending = project.by_status("pending")
-            if not pending:
-                raise RuntimeError(
-                    "no feature to run — the queue is empty (all features done?)"
-                )
-            feat = pending[0]
+            spec_ready = project.by_status("spec_ready")
+            if spec_ready:
+                feat = spec_ready[0]
+            else:
+                pending = project.by_status("pending")
+                if not pending:
+                    raise RuntimeError(
+                        "no feature to run — the queue is empty (all features done?)"
+                    )
+                feat = pending[0]
     if feat.status == "blocked":
         raise RuntimeError(
             f"feature '{feat.name}' is blocked — resume it with "
             "`buildwright harness approve` (or set it in_progress manually)"
         )
-    if feat.status == "spec_ready":
-        raise RuntimeError(
-            f"feature '{feat.name}' is spec_ready — its spec gate is parked; "
-            "resume it with `buildwright harness approve` or `reject`"
-        )
-    if feat.status not in ("in_progress", "pending"):
+    if feat.status not in ("in_progress", "pending", "spec_ready"):
         raise RuntimeError(
             f"feature '{feat.name}' is '{feat.status}'; the loop only executes "
-            "in_progress or pending features"
+            "in_progress, pending or spec_ready features"
         )
     return feat
 
@@ -155,7 +154,8 @@ def _select_features(project: HarnessProject, feature: str | None, budget: int) 
     runnable = [
         f
         for f in project.feature_list.features
-        if f.status == "in_progress" or (f.status == "pending" and f.runnable(done))
+        if f.status in ("in_progress", "spec_ready")
+        or (f.status == "pending" and f.runnable(done))
     ]
     if not runnable:
         raise RuntimeError("no feature to run — the queue is empty (all features done?)")

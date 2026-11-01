@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+## [0.8.4] - 2026-11-01
+
+### Added
+
+- **`harness run` accepts pre-prepared specs.** A feature already in
+  `spec_ready` (or any non-terminal status) with a valid spec trio is now
+  picked up by `harness run` and goes straight to implementation instead of
+  being rejected as a parked spec gate — useful for projects whose specs
+  were authored outside the runtime flow.
+
 ## [0.8.3] - 2026-11-01
 
 ### Added

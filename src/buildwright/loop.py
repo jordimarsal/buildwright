@@ -852,9 +852,16 @@ def _spec_node(ctx: LoopContext) -> LoopNode:
     """pending → spec_author → verify → spec_gate. Already in_progress → skip."""
 
     def node(state: LoopState) -> Command:
-        if ctx.feature.status == "in_progress":
-            # phase-2 entry: the spec was approved interactively before the run
-            return Command(goto="implement_batch", update={"spec_approved": True})
+        if ctx.feature.status in ("in_progress", "spec_ready"):
+            # specs already prepared (and approved, or auto-approvable): skip the
+            # spec phase and go straight to implementation when the trio is valid
+            ok, _ = verify_spec(ctx)
+            if ok:
+                if ctx.feature.status != "in_progress":
+                    set_feature_status(ctx.project.root, ctx.feature.name, "in_progress")
+                    _commit_main_status(ctx.project.root, ctx.feature.name, "in_progress")
+                return Command(goto="implement_batch", update={"spec_approved": True})
+            # invalid/missing trio: fall through and (re)author it
         # a stall re-dispatch opens with what was missing (state-borne feedback)
         out = ctx.run_spec(_spec_prompt(ctx, state.get("dispatch_prompt", "")))
         cost = round(state.get("cost_usd", 0.0) + ctx.last_cost, 6)
@@ -1504,11 +1511,18 @@ def initial_seed(ctx: LoopContext) -> LoopState:
     """Fresh-run state. `in_progress` features start at their first pending
     batch; `pending` features start at the spec phase (the first batch is
     picked when the spec gate approves, from the tasks.md just authored)."""
-    if ctx.feature.status == "in_progress":
-        batch = next_batch(_read_tasks(ctx), ctx.max_tasks)
-        if not batch:
-            raise RuntimeError(f"feature '{ctx.feature.name}' has no pending tasks")
-        batch_ids = [t.task_id for t in batch]
+    if ctx.feature.status == "in_progress" or ctx.feature.status == "spec_ready":
+        try:
+            ok, _ = verify_spec(ctx)
+        except Exception:  # noqa: BLE001
+            ok = False
+        if ok:
+            batch = next_batch(_read_tasks(ctx), ctx.max_tasks)
+            if not batch:
+                raise RuntimeError(f"feature '{ctx.feature.name}' has no pending tasks")
+            batch_ids = [t.task_id for t in batch]
+        else:
+            batch_ids = []
     else:
         batch_ids = []
     return {
