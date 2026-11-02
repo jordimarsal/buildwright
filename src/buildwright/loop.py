@@ -35,6 +35,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, StateSnapshot, interrupt
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.usage import UsageLimits
 
 from . import runlog
 from .config import Settings
@@ -261,13 +262,20 @@ def _loop_caps(root: Path) -> dict[str, int]:
     return caps
 
 
+def _usage_limits(ctx: LoopContext) -> UsageLimits | None:
+    limit = getattr(ctx.settings, "request_limit", None)
+    if not limit:
+        return None
+    return UsageLimits(request_limit=int(limit))
+
+
 def _default_dispatch(ctx: LoopContext) -> Callable[[str], str]:
     def dispatch(prompt: str) -> str:
         model_id = ctx.settings.role_model("worker")
         model = ctx.registry.build(model_id)
         agent = build_implementer(model, ctx.sandbox)
         runlog.emit(f"worker ({model_id}): working…", ctx.project.root)
-        result = agent.run_sync(prompt, deps=ctx.sandbox)
+        result = agent.run_sync(prompt, deps=ctx.sandbox, usage_limits=_usage_limits(ctx))
         ctx.record_usage("worker", model_id, result.usage)
         runlog.emit(f"worker → {_short(result.output)}", ctx.project.root)
         return result.output
@@ -321,7 +329,7 @@ def _default_spec(ctx: LoopContext) -> Callable[[str], str]:
             """List a directory of the worktree."""
             return tool_list_dir(run_ctx.deps, path)
 
-        result = agent.run_sync(prompt, deps=ctx.sandbox)
+        result = agent.run_sync(prompt, deps=ctx.sandbox, usage_limits=_usage_limits(ctx))
         ctx.record_usage("planner", model_id, result.usage)
         runlog.emit(f"spec-author → {len(result.output)} chars", ctx.project.root)
         return result.output
@@ -373,7 +381,7 @@ def _default_gauntlet(ctx: LoopContext) -> Callable[[str], GauntletVerdict]:
             """Run an allowlisted command (tests, gates) in the worktree."""
             return tool_run_command(run_ctx.deps, command)
 
-        result = agent.run_sync(prompt, deps=ctx.sandbox)
+        result = agent.run_sync(prompt, deps=ctx.sandbox, usage_limits=_usage_limits(ctx))
         ctx.record_usage("reviewer", model_id, result.usage)
         runlog.emit(
             f"gauntlet → {result.output.verdict} "
@@ -412,7 +420,7 @@ def _default_review(ctx: LoopContext) -> Callable[[str], ReviewVerdict]:
             """Run an allowlisted command (tests, gates) in the worktree."""
             return tool_run_command(run_ctx.deps, command)
 
-        result = agent.run_sync(prompt, deps=ctx.sandbox)
+        result = agent.run_sync(prompt, deps=ctx.sandbox, usage_limits=_usage_limits(ctx))
         ctx.record_usage("reviewer", model_id, result.usage)
         runlog.emit(
             f"reviewer → {result.output.verdict} "

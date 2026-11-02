@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     langfuse_secret_key: str | None = None
     langfuse_host: str = "http://localhost:3000"
 
+    # Pydantic-AI request limit (agent run). 0 / None = no limit.
+    request_limit: int | None = 50
+
     def role_model(self, role: str) -> str:
         value = getattr(self, f"role_{role}", None)
         if value is None:
