@@ -274,9 +274,7 @@ def parse_tasks(tasks_md: str) -> list[Task]:
         if i == 1:
             continue
         task_id = rest[:i]
-        after = rest[i:]
-        if after.startswith(":"):
-            after = after[1:]
+        after = rest[i:].removeprefix(":")
         tasks.append(Task(task_id=task_id, text=after.lstrip(), done=done))
     return tasks
 
