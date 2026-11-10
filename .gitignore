@@ -8,3 +8,6 @@ __pycache__/
 dist/
 *.egg-info/
 .buildwright/
+
+# sonar-scanner artifacts
+.scannerwork/
