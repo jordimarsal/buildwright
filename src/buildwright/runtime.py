@@ -248,7 +248,7 @@ def build_implementer(model: Model, sandbox: Sandbox) -> Agent[Sandbox, str]:
 
 # ---------- tasks.md parsing + batch selection ----------
 
-TASK_RE = re.compile(r"^-\s\[( |x)\]\s(T\d+):?\s*(.*)$")
+TASK_RE = re.compile(r"^-\s\[( |x)\]\s(T\d+):?[ \t]*(.*)$")
 
 
 @dataclass(frozen=True)
