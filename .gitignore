@@ -11,3 +11,7 @@ dist/
 
 # sonar-scanner artifacts
 .scannerwork/
+
+# coverage report (sonarqube gate)
+coverage.xml
+.coverage
