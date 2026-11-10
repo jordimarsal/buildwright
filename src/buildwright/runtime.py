@@ -248,8 +248,6 @@ def build_implementer(model: Model, sandbox: Sandbox) -> Agent[Sandbox, str]:
 
 # ---------- tasks.md parsing + batch selection ----------
 
-TASK_RE = re.compile(r"^-\s\[( |x)\]\s(T\d+):?[ \t]*(.*)$")
-
 
 @dataclass(frozen=True)
 class Task:
@@ -259,11 +257,28 @@ class Task:
 
 
 def parse_tasks(tasks_md: str) -> list[Task]:
+    """Parse `- [x] T1: text` rows into tasks (format sense regex: sense ReDoS)."""
     tasks: list[Task] = []
-    for line in tasks_md.splitlines():
-        m = TASK_RE.match(line.strip())
-        if m:
-            tasks.append(Task(task_id=m.group(2), text=m.group(3), done=m.group(1) == "x"))
+    for raw in tasks_md.splitlines():
+        line = raw.strip()
+        if not line.startswith("- [") or len(line) < 7:
+            continue
+        if line[3] not in (" ", "x") or line[4:6] != "] ":
+            continue
+        done = line[3] == "x"
+        rest = line[6:]
+        if not rest.startswith("T"):
+            continue
+        i = 1
+        while i < len(rest) and rest[i].isdigit():
+            i += 1
+        if i == 1:
+            continue
+        task_id = rest[:i]
+        after = rest[i:]
+        if after.startswith(":"):
+            after = after[1:]
+        tasks.append(Task(task_id=task_id, text=after.lstrip(), done=done))
     return tasks
 
 
