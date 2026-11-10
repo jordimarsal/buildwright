@@ -8,7 +8,6 @@ never flips feature status: the human reviews and decides.
 
 from __future__ import annotations
 
-import re
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
