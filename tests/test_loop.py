@@ -522,6 +522,9 @@ def test_cost_budget_parks_at_end_with_reason(tmp_path: Path):
     assert out["batch"] == ["T1", "T2", "T3"]
     assert "cost budget exhausted" in " ".join(out["log"])
     assert "$0.50 of $0.01" in " ".join(out["log"])
+
+
+def test_run_limit_stops_clean_then_re_run_continues(tmp_path: Path):
     root = make_repo(
         tmp_path,
         tasks=("T1", "one", "T2", "two", "T3", "three", "T4", "four", "T5", "five"),
