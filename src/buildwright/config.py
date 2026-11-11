@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     # Pydantic-AI request limit (agent run). 0 / None = no limit.
     request_limit: int | None = 50
 
+    # Cost budget per run (USD, acumulat sobre cost_usd). 0 = sense límit.
+    max_cost_usd: float = 0.0
+
     def role_model(self, role: str) -> str:
         value = getattr(self, f"role_{role}", None)
         if value is None:

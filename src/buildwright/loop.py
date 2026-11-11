@@ -171,6 +171,7 @@ class LoopContext:
     max_gate_cycles: int = MAX_GATE_CYCLES
     max_review_rounds: int = MAX_REVIEW_ROUNDS
     max_spec_rounds: int = MAX_SPEC_ROUNDS
+    max_cost_usd: float = 0.0  # 0 = sense límit de cost per run
     dispatch: Callable[[str], str] | None = None
     review: Callable[[str], ReviewVerdict] | None = None
     spec: Callable[[str], str] | None = None
@@ -217,6 +218,7 @@ def make_context(
     *,
     max_tasks: int = DEFAULT_MAX_TASKS,
     max_batches: int = DEFAULT_MAX_BATCHES,
+    max_cost_usd: float = 0.0,
     dispatch: Callable[[str], str] | None = None,
     review: Callable[[str], ReviewVerdict] | None = None,
     spec: Callable[[str], str] | None = None,
@@ -240,6 +242,7 @@ def make_context(
         registry=ModelRegistry.load(settings.models_file),
         max_tasks=max_tasks,
         max_batches=max_batches,
+        max_cost_usd=max_cost_usd,
         **_loop_caps(project.root),
         dispatch=dispatch,
         review=review,
@@ -1263,6 +1266,16 @@ def _advance_node(ctx: LoopContext) -> LoopNode:
             log.append("all batches complete → reviewer")
             return Command(goto="reviewer", update={**reset, "log": log})
         batch = [t.task_id for t in remaining]
+        spent = state.get("cost_usd", 0.0)
+        if ctx.max_cost_usd > 0 and spent >= ctx.max_cost_usd:
+            log.append(
+                f"cost budget exhausted (${spent:.2f} of ${ctx.max_cost_usd:.2f}) "
+                "— raise BW_MAX_COST_USD to continue"
+            )
+            return Command(
+                goto=END,
+                update={**reset, "batch": batch, "log": log},
+            )
         if batches_done >= state.get("run_limit", ctx.max_batches):
             log.append(
                 f"run limit reached ({batches_done}/{state.get('run_limit', ctx.max_batches)}) "

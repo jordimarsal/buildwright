@@ -235,6 +235,7 @@ def ctx_for(
     *,
     max_tasks: int = 3,
     max_batches: int = 10,
+    max_cost_usd: float = 0.0,
     spec: Callable[[str], str] | None = None,
     gauntlet: Callable[[str], GauntletVerdict] | None = None,
     feature: str = "f2_hub",
@@ -246,6 +247,7 @@ def ctx_for(
         feature,
         max_tasks=max_tasks,
         max_batches=max_batches,
+        max_cost_usd=max_cost_usd,
         dispatch=dispatch,
         review=review,
         spec=spec,
@@ -507,7 +509,19 @@ def test_init_gate_failures_park_with_gate_fails(tmp_path: Path):
     assert any("init gate FAILED" in p for p in dispatch.prompts)
 
 
-def test_run_limit_stops_clean_then_re_run_continues(tmp_path: Path):
+def test_cost_budget_parks_at_end_with_reason(tmp_path: Path):
+    root = make_repo(
+        tmp_path,
+        tasks=("T1", "one", "T2", "two", "T3", "three", "T4", "four", "T5", "five"),
+    )
+    dispatch = FakeDispatch(root)
+    ctx = ctx_for(root, dispatch, ScriptedReview(APPROVED), max_tasks=3, max_cost_usd=0.01)
+
+    out = invoke(ctx, prepare_seed(ctx, {"cost_usd": 0.5}))
+    assert isinstance(out, dict) and "__interrupt__" not in out and not out.get("finalized")
+    assert out["batch"] == ["T1", "T2", "T3"]
+    assert "cost budget exhausted" in " ".join(out["log"])
+    assert "$0.50 of $0.01" in " ".join(out["log"])
     root = make_repo(
         tmp_path,
         tasks=("T1", "one", "T2", "two", "T3", "three", "T4", "four", "T5", "five"),
