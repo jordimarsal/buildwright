@@ -7,7 +7,7 @@ format ever drifts, these tests fail here — before debrief refuses the log.
 
 import re
 
-from buildwright.debrief_log import DebriefSink, engine_build, sanitize
+from buildwright.debrief_log import DebriefSink, engine_build, find_open_episode, sanitize
 
 # mirrored from debrief/src/debrief/adapters/buildwright_log.py
 _STEP_RE = re.compile(
@@ -23,7 +23,7 @@ _RESULT_RE = re.compile(r"^(?P<outcome>\S+)(?:\s+failed_steps=(?P<failed_steps>\
 
 def mk_sink(tmp_path, feature="subtract"):
     return DebriefSink(
-        tmp_path,
+        tmp_path / "evidence" / feature / "exec20261113T1200Z" / f"{feature}.log",
         feature=feature,
         engine="buildwright-0.8.5",
         roles={"planner": "remote/zai-glm-flash",
@@ -105,6 +105,49 @@ class TestDebriefSink:
         assert sink.finish() is None
         assert sum(1 for l in sink.path.read_text().splitlines()
                    if l.startswith("result:")) == 1
+
+
+class TestResume:
+    def test_resume_continues_ordinals_and_result_covers_history(self, tmp_path):
+        first = mk_sink(tmp_path)
+        first.step("worker", "m", "fail", "verify: incomplete", "impl.md")
+        # a later invocation re-opens the same episode file (parked → approved)
+        second = mk_sink(tmp_path)
+        second.step("worker", "m", "pass", "verify ok", "impl.md")
+        assert second.finish() == "fail failed_steps=1"
+        text = second.path.read_text(encoding="utf-8")
+        assert text.count("step:") == 2  # headers were not rewritten
+        assert "step: 02" in text
+        assert text.splitlines()[-1] == "result: fail failed_steps=1"
+
+    def test_finished_episode_is_not_reopened(self, tmp_path):
+        first = mk_sink(tmp_path)
+        first.step("worker", "m", "pass", "ok", "e.md")
+        first.finish()
+        second = mk_sink(tmp_path)
+        assert second.finish() is None
+        assert sum(1 for l in second.path.read_text().splitlines()
+                   if l.startswith("result:")) == 1
+
+
+class TestFindOpenEpisode:
+    def test_returns_the_unfinished_episode(self, tmp_path):
+        base = tmp_path / "evidence"
+        done = base / "proj" / "exec20261113T1200Z"
+        open_ep = base / "proj" / "exec20261113T1300Z"
+        done.mkdir(parents=True)
+        open_ep.mkdir(parents=True)
+        (done / "subtract.log").write_text("step: 01 ...\nresult: pass\n")
+        (open_ep / "subtract.log").write_text("step: 01 ...\n")
+        found = find_open_episode(base, "proj", "subtract")
+        assert found == open_ep / "subtract.log"
+
+    def test_none_when_every_episode_is_closed(self, tmp_path):
+        base = tmp_path / "evidence"
+        done = base / "proj" / "exec20261113T1200Z"
+        done.mkdir(parents=True)
+        (done / "subtract.log").write_text("result: pass\n")
+        assert find_open_episode(base, "proj", "subtract") is None
 
 
 class TestHelpers:

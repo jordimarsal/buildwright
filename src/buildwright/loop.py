@@ -544,6 +544,28 @@ def _commit_main_status(root: Path, feature_name: str, status: str) -> None:
         )
 
 
+def _commit_debrief_evidence(ctx: LoopContext, message: str) -> None:
+    """Commit the in-repo evidence file so main never sits dirty while a human
+    gate is open (a dirty main would block the later finalize). Central mode
+    (BW_DEBRIEF_ROOT): the evidence lives outside this repo → no-op. Takes
+    MAIN_LOCK itself, like _commit_main_status; never call it while holding it.
+    """
+    if ctx.debrief is None:
+        return
+    try:
+        rel = ctx.debrief.path.relative_to(ctx.project.root)
+    except ValueError:
+        return  # central evidence tree: outside this repo
+    if not ctx.debrief.path.exists():
+        return
+    root = ctx.project.root
+    with MAIN_LOCK:
+        _run_or_raise(root, ["add", str(rel)], "stage debrief evidence")
+        if _git(root, "diff", "--cached", "--quiet").returncode != 0:
+            _run_or_raise(root, [*GIT_IDENTITY, "commit", "-m", message],
+                          "commit debrief evidence")
+
+
 def _finalize(ctx: LoopContext, state: LoopState) -> list[str]:
     """Merge, then APPROVAL → status done → history.md + retro, then commit clean."""
     root, worktree, feat = ctx.project.root, ctx.worktree, ctx.feature
@@ -561,23 +583,13 @@ def _finalize(ctx: LoopContext, state: LoopState) -> list[str]:
         )
         lines.append(f"worktree committed: feat({feat.name}): {feat.title}")
 
+    # 1.5 in-repo evidence (self-contained mode): committed here so the clean
+    # check below passes; central mode is a no-op (evidence lives outside the
+    # repo). Called before MAIN_LOCK: the helper takes the lock itself.
+    _commit_debrief_evidence(ctx, f"chore({feat.name}): debrief evidence log")
+
     # steps 2-8 mutate main: parallel mode serializes them through MAIN_LOCK
     with MAIN_LOCK:
-        # 1.5 debrief evidence (artifacts/ is tracked): commit it before the clean
-        # check — a log written during the run must never block the merge, and
-        # every clone ships the receipts. Sweeps leftovers from earlier parked
-        # features too; a no-op when nothing changed.
-        artifacts_rel = debrief_log.ARTIFACTS_RELATIVE
-        if (root / artifacts_rel).is_dir():
-            _run_or_raise(root, ["add", str(artifacts_rel)], "stage debrief evidence")
-            if _git(root, "diff", "--cached", "--quiet").returncode != 0:
-                _run_or_raise(
-                    root,
-                    [*identity, "commit", "-m", f"chore({feat.name}): debrief evidence log"],
-                    "commit debrief evidence",
-                )
-                lines.append("debrief evidence committed to main")
-
         # 2. main must be clean before the completion gate may merge
         dirty = _git(root, "status", "--porcelain").stdout.strip()
         if dirty:
@@ -1462,6 +1474,7 @@ def _park_node(ctx: LoopContext) -> LoopNode:
         target = state.get("park_target", "implement_batch")
         # persist the block BEFORE parking: a crashed process must leave it blocked
         _commit_main_status(ctx.project.root, ctx.feature.name, "blocked")
+        _commit_debrief_evidence(ctx, f"chore({ctx.feature.name}): debrief evidence (parked)")
         answer = interrupt(
             {
                 "gate": "parked",

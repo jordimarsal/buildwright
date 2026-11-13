@@ -37,7 +37,6 @@ _STEP_RE = re.compile(
 )
 _RESULT_RE = re.compile(r"^(?P<outcome>\S+)(?:\s+failed_steps=(?P<failed_steps>\S*))?$")
 
-ARTIFACTS_RELATIVE = Path("artifacts") / "buildwright"
 _HEADER = "buildwright run log — evidence of one episode; debrief reads it, never edits it"
 
 
@@ -55,31 +54,37 @@ def sanitize(text: str) -> str:
 
 
 class DebriefSink:
-    """Streams one feature episode into ``<root>/artifacts/buildwright/<run_id>.log``.
+    """Streams one feature episode into ``<artifacts root>/<project>/exec<id>/<feature>.log``.
 
     Headers go down at creation (the feature and role routing are known then),
     one ``step:`` line per recorded outcome, and ``result:`` at ``finish()`` —
-    computed from the recorded steps so it can never contradict them.
+    computed from the recorded steps so it can never contradict them. The
+    caller picks the location: inside the project (self-contained mode,
+    finalize commits it) or a central debrief evidence tree (BW_DEBRIEF_ROOT,
+    the mode the debrief MCP reads).
     """
 
     def __init__(
         self,
-        root: Path,
+        path: Path,
         feature: str,
         engine: str,
         roles: dict[str, str],
         run_id: str | None = None,
     ) -> None:
+        self.path = path
         self.run_id = run_id or (
             f"{feature}-{datetime.now(UTC):%Y-%m-%dT%H-%MZ}"
         )
-        self.path = root / ARTIFACTS_RELATIVE / f"{self.run_id}.log"
         self._feature = feature
         self._steps: list[tuple[str, str, str, str, str]] = []
         self._finished = False
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            self._resume(path)
+            return
         roles_header = " ".join(f"BW_ROLE_{r.upper()}={m}" for r, m in roles.items())
-        self.path.write_text(
+        path.write_text(
             "\n".join(
                 [
                     _HEADER,
@@ -92,6 +97,20 @@ class DebriefSink:
             + "\n",
             encoding="utf-8",
         )
+
+    def _resume(self, path: Path) -> None:
+        """Continue an unfinished episode: re-read its steps so ordinals and the
+        result computation cover the whole history, not just this invocation."""
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("step:"):
+                m = _STEP_RE.match(line)
+                if m is None:  # pragma: no cover — our own writer wrote it
+                    raise ValueError(f"existing step line is malformed: {line!r}")
+                self._steps.append(
+                    (m["role"], m["model"], m["outcome"], m["reason"], m["evidence"])
+                )
+            elif line.startswith("result:"):
+                self._finished = True  # episode already closed: nothing left to do
 
     def step(self, role: str, model: str, outcome: str, reason: str, evidence: str) -> None:
         """Record one role outcome. Only pass/fail exist — anything else is a
@@ -126,3 +145,15 @@ class DebriefSink:
         with self.path.open("a", encoding="utf-8") as f:
             f.write(f"result: {result}\n")
         return result
+
+
+def find_open_episode(base: Path, project_name: str, feature: str) -> Path | None:
+    """The most recent episode log for this feature that has no ``result:`` yet —
+    the file a resumed run must keep writing to, so one episode stays one file
+    across human gates. Exec dirs are UTC-stamped, so name order is time order.
+    None → start a fresh exec dir."""
+    episodes = sorted((base / project_name).glob(f"exec*/{feature}.log"))
+    for path in reversed(episodes):
+        if "result:" not in path.read_text(encoding="utf-8"):
+            return path
+    return None

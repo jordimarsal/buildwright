@@ -72,6 +72,13 @@ class Settings(BaseSettings):
     # Cost budget per run (USD, acumulat sobre cost_usd). 0 = sense límit.
     max_cost_usd: float = 0.0
 
+    # debrief evidence root (BW_DEBRIEF_ROOT): where run logs are published.
+    # Set it to the debrief checkout's artifacts/ to centralize every project's
+    # evidence in one git-tracked tree the debrief MCP reads:
+    #   <debrief_root>/<project_name>/exec<UTC-id>/<feature>.log
+    # Unset → in-repo artifacts/ (committed by finalize), the self-contained mode.
+    debrief_root: Path | None = None
+
     def role_model(self, role: str) -> str:
         value = getattr(self, f"role_{role}", None)
         if value is None:
