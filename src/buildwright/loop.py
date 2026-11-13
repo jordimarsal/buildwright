@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.usage import UsageLimits
 
-from . import runlog
+from . import debrief_log, runlog
 from .config import Settings
 from .harness import Feature, FeatureList, HarnessProject
 from .registry import ModelRegistry
@@ -178,6 +178,8 @@ class LoopContext:
     gauntlet: Callable[[str], GauntletVerdict] | None = None
     auto: bool = False  # auto-approve spec/completion gates; parks still interrupt
     last_cost: float = 0.0  # cost delta of the last agent call (0 when unpriced)
+    # debrief evidence sink (one file per episode); None = emission disabled (tests)
+    debrief: debrief_log.DebriefSink | None = None
 
     def record_usage(self, role: str, model_id: str, usage: Any) -> float:
         """Fold one call's token usage into last_cost (phase-4 cost feedback).
@@ -244,6 +246,7 @@ def make_context(
         max_batches=max_batches,
         max_cost_usd=max_cost_usd,
         **_loop_caps(project.root),
+        debrief=None,
         dispatch=dispatch,
         review=review,
         spec=spec,
@@ -560,6 +563,21 @@ def _finalize(ctx: LoopContext, state: LoopState) -> list[str]:
 
     # steps 2-8 mutate main: parallel mode serializes them through MAIN_LOCK
     with MAIN_LOCK:
+        # 1.5 debrief evidence (artifacts/ is tracked): commit it before the clean
+        # check — a log written during the run must never block the merge, and
+        # every clone ships the receipts. Sweeps leftovers from earlier parked
+        # features too; a no-op when nothing changed.
+        artifacts_rel = debrief_log.ARTIFACTS_RELATIVE
+        if (root / artifacts_rel).is_dir():
+            _run_or_raise(root, ["add", str(artifacts_rel)], "stage debrief evidence")
+            if _git(root, "diff", "--cached", "--quiet").returncode != 0:
+                _run_or_raise(
+                    root,
+                    [*identity, "commit", "-m", f"chore({feat.name}): debrief evidence log"],
+                    "commit debrief evidence",
+                )
+                lines.append("debrief evidence committed to main")
+
         # 2. main must be clean before the completion gate may merge
         dirty = _git(root, "status", "--porcelain").stdout.strip()
         if dirty:
@@ -905,6 +923,14 @@ def _spec_node(ctx: LoopContext) -> LoopNode:
                     "log": [*log, f"spec: INCOMPLETE — {reason}"],
                 },
             )
+        if ctx.debrief is not None:
+            ctx.debrief.step(
+                "spec-author",
+                ctx.settings.role_model("planner"),
+                "pass",
+                f"trio verified: {len(out)} chars",
+                f"harness/specs/{ctx.feature.name}/design.md",
+            )
         set_feature_status(ctx.project.root, ctx.feature.name, "spec_ready")
         _commit_main_status(ctx.project.root, ctx.feature.name, "spec_ready")
         return Command(
@@ -1085,6 +1111,14 @@ def _verify_node(ctx: LoopContext) -> LoopNode:
                 f"stall {state.get('stalls_total', 0) + 1}: "
                 f"[{', '.join(batch_ids)}] wrote nothing — re-dispatch"
             )
+            if ctx.debrief is not None:
+                ctx.debrief.step(
+                    "worker",
+                    ctx.settings.role_model("worker"),
+                    "fail",
+                    log[-1],
+                    f"harness/progress/impl_{ctx.feature.name}.md",
+                )
             return Command(
                 goto="implement_batch",
                 update={
@@ -1100,6 +1134,14 @@ def _verify_node(ctx: LoopContext) -> LoopNode:
             missing = [t.task_id for t in batch if not t.done]
             log.append(f"verify: incomplete — {', '.join(missing)} not marked on disk")
             runlog.emit(log[-1], ctx.project.root)
+            if ctx.debrief is not None:
+                ctx.debrief.step(
+                    "worker",
+                    ctx.settings.role_model("worker"),
+                    "fail",
+                    log[-1],
+                    f"harness/progress/impl_{ctx.feature.name}.md",
+                )
             return Command(
                 goto="implement_batch",
                 update={
@@ -1114,6 +1156,14 @@ def _verify_node(ctx: LoopContext) -> LoopNode:
 
         log.append(f"verify: [{', '.join(batch_ids)}] marked on disk, worktree changed")
         runlog.emit(log[-1], ctx.project.root)
+        if ctx.debrief is not None:
+            ctx.debrief.step(
+                "worker",
+                ctx.settings.role_model("worker"),
+                "pass",
+                log[-1],
+                f"harness/progress/impl_{ctx.feature.name}.md",
+            )
         return Command(
             goto="init_gate",
             update={"stalls": 0, "batch_attempts": 0, "log": log},
@@ -1137,6 +1187,15 @@ def _gate_node(
             fails.pop(name, None)
             return Command(goto=on_pass, update={"gate_fails": fails, "log": log})
         fails[name] = fails.get(name, 0) + 1
+        if ctx.debrief is not None:
+            # the fix dispatch goes to the worker, so the gate failure is its step
+            ctx.debrief.step(
+                "worker",
+                ctx.settings.role_model("worker"),
+                "fail",
+                outcome.log,
+                f"harness/logs/{ctx.feature.name}/gate_{name}.log",
+            )
         update: LoopState = {
             "gate_fails": fails,
             "dispatch_prompt": outcome.feedback,
@@ -1298,6 +1357,16 @@ def _reviewer_node(ctx: LoopContext) -> LoopNode:
     def node(state: LoopState) -> Command:
         verdict = ctx.run_review(_review_prompt(ctx))
         path = _write_review(ctx, verdict)
+        if ctx.debrief is not None:
+            approved = verdict.verdict == "APPROVED"
+            ctx.debrief.step(
+                "reviewer",
+                ctx.settings.role_model("reviewer"),
+                "pass" if approved else "fail",
+                f"review: {verdict.verdict}"
+                + (f" — {verdict.summary}" if not approved and verdict.summary else ""),
+                str(path.relative_to(ctx.worktree)),
+            )
         log = [
             *state.get("log", []),
             f"review: {verdict.verdict} → {path.relative_to(ctx.worktree)}",
@@ -1436,6 +1505,10 @@ def _park_node(ctx: LoopContext) -> LoopNode:
 
 def _finalize_node(ctx: LoopContext) -> LoopNode:
     def node(state: LoopState) -> Command:
+        # result: goes in BEFORE the finalize commits evidence — the committed
+        # file must be the complete episode (result header included)
+        if ctx.debrief is not None:
+            ctx.debrief.finish()
         try:
             lines = _finalize(ctx, state)
         except FinalizeError as exc:
@@ -1447,6 +1520,8 @@ def _finalize_node(ctx: LoopContext) -> LoopNode:
                     "log": [*state.get("log", []), f"finalize FAILED: {exc}"],
                 },
             )
+        if ctx.debrief is not None:
+            ctx.debrief.finish()
         return Command(
             goto=END,
             update={"finalized": True, "log": [*state.get("log", []), *lines]},

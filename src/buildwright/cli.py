@@ -8,7 +8,7 @@ from typing import Any
 
 from langgraph.types import Command, RunnableConfig
 
-from . import runlog
+from . import debrief_log, runlog
 from .agents import Wright
 from .config import ROLES, Settings
 from .graph import build_graph
@@ -187,6 +187,18 @@ def _run_one_feature(
         spec=spec,
         gauntlet=gauntlet,
         auto=auto,
+    )
+    # debrief evidence: headers go down now (feature + role routing known), step
+    # lines stream from the loop nodes, result: closes the episode at finalize
+    ctx.debrief = debrief_log.DebriefSink(
+        project.root,
+        feature=feat.name,
+        engine=debrief_log.engine_build(),
+        roles={
+            "planner": settings.role_model("planner"),
+            "worker": settings.role_model("worker"),
+            "reviewer": settings.role_model("reviewer"),
+        },
     )
     tracer = get_tracer(settings)
     with loop_session(project.root) as saver, tracer.span(
