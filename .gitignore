@@ -15,6 +15,3 @@ dist/
 # coverage report (sonarqube gate)
 coverage.xml
 .coverage
-
-# debrief evidence tree (derived run logs; local receipts)
-artifacts/
