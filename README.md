@@ -46,6 +46,26 @@ uv run buildwright ask "write a snake game in python with pygame"
 With no endpoints available, `ask` fails naming the exact model and the missing
 env var.
 
+## Close the loop (debrief → roles apply)
+
+[debrief-mcp](https://github.com/jordimarsal/debrief-mcp) reads the ggufbench
+catalog and buildwright run logs, and proposes role changes **as text** — it
+never writes (its ADR-0001). This CLI is the write side, gated by you:
+
+```bash
+buildwright roles apply proposal.txt        # debrief's routing.propose output
+debrief ... | buildwright roles apply -     # or pipe it straight in
+buildwright roles set worker=remote/zai-glm-flash   # direct form, no proposal
+```
+
+`apply` consumes debrief's output verbatim: only the `+ BW_ROLE_<ROLE>=<model>`
+lines are candidates (a `-` line can never un-apply), the role and model id are
+validated against the registry, and the `why run` / `why bench` evidence is
+shown **before** the confirmation prompt. On approval it rewrites `.env`
+line-preserving and atomic. Unknown model ids are refused with the known ones —
+add them to `models.yaml` first. Re-applying an applied proposal is a no-op;
+declining writes nothing; refusals exit 2, declines exit 0.
+
 ## Local and remote models
 
 The whole registry speaks **OpenAI-compatible** (`models.yaml`):

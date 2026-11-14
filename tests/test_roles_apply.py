@@ -10,6 +10,9 @@ Spec: docs/specs/2026-11-14-roles-apply-design.md
 
 from pathlib import Path
 
+import pytest
+
+from buildwright.cli import main
 from buildwright.roles_apply import (
     apply_changes,
     parse_proposals,
@@ -216,3 +219,93 @@ class TestApplyChanges:
         changes, _ = _validate(result.candidates)
         apply_changes(env, changes)
         assert list(tmp_path.iterdir()) == [env]
+
+
+class TestCli:
+    """End-to-end through `cli.main` in a tmp cwd (the bundled registry serves ids)."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        for name in ("BW_ROLE_PLANNER", "BW_ROLE_WORKER", "BW_ROLE_REVIEWER"):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_apply_yes_updates_env_and_roles_shows_it(self, capsys):
+        main(["roles", "apply", str(FIXTURES / "debrief_proposal.txt"), "--yes"])
+        out = capsys.readouterr().out
+        assert ".env: 1 line(s) updated" in out
+        assert "local/llamacpp → remote/zai-glm-flash" in out
+        assert (Path(".env")).read_text(encoding="utf-8").startswith("# buildwright role routing")
+        main(["roles"])
+        roles_out = capsys.readouterr().out
+        assert "remote/zai-glm-flash" in roles_out
+
+    def test_apply_stdin_dash(self, monkeypatch, capsys):
+        import io
+
+        monkeypatch.setattr("sys.stdin", io.StringIO(PROPOSAL))
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        main(["roles", "apply", "-"])
+        capsys.readouterr()
+        assert "BW_ROLE_WORKER=remote/zai-glm-flash" in Path(".env").read_text(encoding="utf-8")
+
+    def test_apply_decline_writes_nothing(self, monkeypatch, capsys):
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+        main(["roles", "apply", str(FIXTURES / "debrief_proposal.txt")])
+        out = capsys.readouterr().out
+        assert "nothing written (declined)" in out
+        assert not Path(".env").exists()
+
+    def test_apply_noop_is_exit_zero_without_write(self, tmp_path, capsys):
+        proposal = tmp_path / "noop.txt"
+        proposal.write_text("+ BW_ROLE_WORKER=local/llamacpp\n", encoding="utf-8")
+        main(["roles", "apply", str(proposal), "--yes"])
+        assert "already holds local/llamacpp" in capsys.readouterr().out
+        assert not Path(".env").exists()
+
+    def test_apply_without_candidates_refuses_with_saw_summary(self, tmp_path):
+        proposal = tmp_path / "notes.txt"
+        proposal.write_text("note: step on code recorded no role\n", encoding="utf-8")
+        with pytest.raises(SystemExit) as exc:
+            main(["roles", "apply", str(proposal), "--yes"])
+        assert exc.value.code == 2
+
+    def test_apply_conflict_refuses_whole_apply(self, tmp_path):
+        proposal = tmp_path / "conflict.txt"
+        proposal.write_text(PROPOSAL + "+ BW_ROLE_WORKER=remote/gpt-4o-mini\n", encoding="utf-8")
+        with pytest.raises(SystemExit) as exc:
+            main(["roles", "apply", str(proposal), "--yes"])
+        assert exc.value.code == 2
+        assert not Path(".env").exists()
+
+    def test_apply_unknown_model_refuses_with_hint(self, tmp_path, capsys):
+        proposal = tmp_path / "unknown.txt"
+        proposal.write_text("+ BW_ROLE_WORKER=remote/claude-opus\n", encoding="utf-8")
+        with pytest.raises(SystemExit) as exc:
+            main(["roles", "apply", str(proposal), "--yes"])
+        assert exc.value.code == 2
+        assert "models.yaml" in capsys.readouterr().err
+
+    def test_apply_warns_when_env_wins(self, monkeypatch, capsys):
+        monkeypatch.setenv("BW_ROLE_WORKER", "local/llamacpp")
+        main(["roles", "apply", str(FIXTURES / "debrief_proposal.txt"), "--yes"])
+        out = capsys.readouterr().out
+        assert "wins over .env" in out
+        assert "BW_ROLE_WORKER=remote/zai-glm-flash" in Path(".env").read_text(encoding="utf-8")
+
+    def test_set_updates_env(self, capsys):
+        main(["roles", "set", "worker=remote/zai-glm-flash", "--yes"])
+        assert "BW_ROLE_WORKER=remote/zai-glm-flash" in Path(".env").read_text(encoding="utf-8")
+
+    def test_set_accepts_bw_role_prefix_and_case(self, capsys):
+        main(["roles", "set", "BW_ROLE_Reviewer=local/qwen3", "--yes"])
+        assert "BW_ROLE_REVIEWER=local/qwen3" in Path(".env").read_text(encoding="utf-8")
+
+    def test_set_without_equals_refuses(self):
+        with pytest.raises(SystemExit) as exc:
+            main(["roles", "set", "worker", "--yes"])
+        assert exc.value.code == 2
+
+    def test_roles_still_lists_without_subcommand(self, capsys):
+        main(["roles"])
+        assert "role" in capsys.readouterr().out

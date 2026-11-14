@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`roles apply` / `roles set` — the human gate closing the debrief loop.**
+  debrief proposes routing changes as text and never writes; buildwright now
+  consumes that output verbatim: parses the `+ BW_ROLE_<ROLE>=<model>` lines,
+  validates role and model id against the registry (unknown ids are refused
+  with the known ones and a models.yaml hint), shows the `why run` / `why
+  bench` evidence and asks before rewriting `.env` atomically. Line-preserving
+  write, no-op-safe re-apply, env-vs-file precedence warning, and a guard that
+  refuses when a project's `harness/runtime.yaml` carries a `roles` key.
+  Spec: `docs/specs/2026-11-14-roles-apply-design.md`.
+
 ## [0.8.4] - 2026-11-01
 
 ### Added

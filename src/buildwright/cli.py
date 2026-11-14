@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import yaml
 from langgraph.types import Command, RunnableConfig
 
 from . import debrief_log, runlog
@@ -28,6 +30,14 @@ from .loop import (
 )
 from .observability import get_tracer
 from .registry import ModelRegistry
+from .roles_apply import (
+    Candidate,
+    PlanChange,
+    apply_changes,
+    canonical_role,
+    parse_proposals,
+    validate_candidates,
+)
 
 
 def _wright(settings: Settings) -> Wright:
@@ -52,6 +62,104 @@ def cmd_roles(settings: Settings) -> None:
         model_id = settings.role_model(role)
         wire = registry.spec(model_id).model or model_id.split("/", 1)[1]
         print(f"{role:<12} {model_id:<24} {wire}")
+
+
+# ---------- roles apply / set: the human gate closing the debrief loop ----------
+
+
+def _model_known(registry: ModelRegistry, model_id: str) -> bool:
+    try:
+        registry.spec(model_id)
+    except KeyError:
+        return False
+    return True
+
+
+def _runtime_roles_active(root: Path) -> bool:
+    """Future-D1 guard: a harness/runtime.yaml `roles:` key wins over .env."""
+    cfg = root / "harness" / "runtime.yaml"
+    if not cfg.is_file():
+        return False
+    data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+    return "roles" in data
+
+
+def _read_proposal(path: str | None) -> str:
+    if path and path != "-":
+        return Path(path).read_text(encoding="utf-8")
+    return sys.stdin.read()
+
+
+def _refuse(messages: list[str]) -> None:
+    for message in messages:
+        print(f"refused: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def _validated_changes(settings: Settings, candidates: list[Candidate]) -> list[PlanChange]:
+    registry = ModelRegistry.load(settings.models_file)
+    changes, refusals = validate_candidates(
+        candidates,
+        known_roles=ROLES,
+        model_known=lambda mid: _model_known(registry, mid),
+        known_model_ids=lambda: ", ".join(sorted(s.id for s in registry.list())),
+        current_of=settings.role_model,
+        env_has=lambda name: bool(os.environ.get(name)),
+        runtime_roles_active=_runtime_roles_active(Path.cwd()),
+    )
+    if refusals:
+        _refuse(refusals)
+    return changes
+
+
+def _gate_and_write(changes: list[PlanChange], yes: bool) -> None:
+    """The gate: show the change and its evidence, ask, then write .env once."""
+    active = [c for c in changes if not c.noop]
+    for i, ch in enumerate(active, 1):
+        print(f"change {i}/{len(active)}  role={ch.role}")
+        print(f"  {ch.current} → {ch.target}")
+        for why in ch.why:
+            print(f"  {why}")
+        if ch.env_wins:
+            print(
+                f"  warning: {ch.role_env} is set in your environment and wins"
+                " over .env — unset it"
+            )
+    for ch in changes:
+        if ch.noop:
+            print(f"no-op: {ch.role_env} already holds {ch.target}")
+    if not active:
+        return
+    if not yes and input(f"apply {len(active)} change(s) to .env? [y/N] ").strip().lower() not in (
+        "y",
+        "yes",
+    ):
+        print("nothing written (declined)")
+        return
+    changed, created = apply_changes(Path(".env"), active)
+    suffix = " (created)" if created else ""
+    print(f".env: {changed} line(s) updated{suffix}")
+
+
+def cmd_roles_apply(settings: Settings, path: str | None, yes: bool) -> None:
+    """Apply debrief's routing.propose output: parse, validate, gate, write .env."""
+    result = parse_proposals(_read_proposal(path))
+    if result.conflicts:
+        _refuse(list(result.conflicts))
+    if not result.candidates:
+        saw = ", ".join(f"{kind}×{n}" for kind, n in sorted(result.saw.items()))
+        _refuse([f"no '+ BW_ROLE_<ROLE>=<model>' lines in the input (saw: {saw or 'nothing recognizable'})"])
+    _gate_and_write(_validated_changes(settings, list(result.candidates)), yes)
+
+
+def cmd_roles_set(settings: Settings, assignment: str, yes: bool) -> None:
+    """Direct form without a proposal: `roles set worker=remote/zai-glm-flash`."""
+    raw, sep, model = assignment.partition("=")
+    if not sep or not raw.strip() or not model.strip():
+        _refuse(["expected ROLE=MODEL (e.g. worker=remote/zai-glm-flash)"])
+    role, role_env = canonical_role(raw.strip())
+    candidate = Candidate(role=role, role_env=role_env, model=model.strip())
+    _gate_and_write(_validated_changes(settings, [candidate]), yes)
 
 
 def cmd_ask(settings: Settings, task: str) -> None:
@@ -506,7 +614,24 @@ def main(argv: list[str] | None = None) -> None:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("models", help="list the models in the registry")
-    sub.add_parser("roles", help="show the role -> model mapping")
+    roles_p = sub.add_parser(
+        "roles",
+        help="show the role -> model mapping; apply debrief proposals or set one directly",
+    )
+    roles_sub = roles_p.add_subparsers(dest="roles_cmd")
+    roles_apply = roles_sub.add_parser(
+        "apply",
+        help="apply debrief's routing.propose output to .env (the human gate)",
+    )
+    roles_apply.add_argument(
+        "path", nargs="?", default=None, help="proposal file ('-' or omitted = stdin)"
+    )
+    roles_apply.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    roles_set = roles_sub.add_parser(
+        "set", help="set one role directly: ROLE=model-id (BW_ROLE_ prefix tolerated)"
+    )
+    roles_set.add_argument("assignment", help="e.g. worker=remote/zai-glm-flash")
+    roles_set.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     ask = sub.add_parser("ask", help="run the plan -> execute -> review pipeline")
     ask.add_argument("task")
 
@@ -604,7 +729,12 @@ def main(argv: list[str] | None = None) -> None:
         if args.cmd == "models":
             cmd_models(settings)
         elif args.cmd == "roles":
-            cmd_roles(settings)
+            if args.roles_cmd == "apply":
+                cmd_roles_apply(settings, args.path, args.yes)
+            elif args.roles_cmd == "set":
+                cmd_roles_set(settings, args.assignment, args.yes)
+            else:
+                cmd_roles(settings)
         elif args.cmd == "harness":
             if args.hcmd == "status":
                 cmd_harness_status(settings, args.path)
