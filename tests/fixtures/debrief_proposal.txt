@@ -1,0 +1,7 @@
+proposal: BW_ROLE_WORKER holds local/llamacpp, which failed task code
+- BW_ROLE_WORKER=local/llamacpp
++ BW_ROLE_WORKER=remote/zai-glm-flash
+why run: local/llamacpp failed code (5/8 tasks passed) — evidence/debrief/exec20261114T0900Z/buildwright.log
+why bench: remote/zai-glm-flash passed code at score 0.90 (code 90% across 72 tasks) — artifacts/ggufbench/20261105-115157-ia_models_qwen3_5/results.json
+signature: code=8 graded [passed 3, failed 5] · baseline ed3153c0
+not applied: debrief never writes; paste the + line into the buildwright role env (ADR-0001). Proposals target roles, never models.yaml (ADR-0003).
