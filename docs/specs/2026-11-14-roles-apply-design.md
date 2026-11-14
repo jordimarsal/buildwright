@@ -1,7 +1,14 @@
 # Design — `roles apply`: the human gate that closes the debrief loop
 
 **Date:** 2026-11-14
-**Status:** draft (pre-implementation) — parked at the **Spec Gate** (human)
+**Status:** ✅ **implemented** (Completion Gate approved 2026-11-14) — commits
+`d7946e8` (spec) · `1e3c951` (T1-T3: parser, validate, envfile) · `30f2205`
+(T4-T5: CLI, docs). Gates: pytest 31/31 (feature), ruff clean, mypy --strict
+clean, e2e demo verified (`roles apply - --yes` → `.env` written → `roles`
+shows the new mapping). Known unrelated issue found during verification: the
+2 pre-existing `test_loop.py` failures (loop.py `finalize` still stages
+in-repo `artifacts/` that `.gitignore` excludes since the central-tree
+migration) — left untouched, needs its own decision.
 **Scope:** `buildwright` — one new module (`roles_apply.py`), two CLI subcommands
 (`roles apply`, `roles set`), tests, docs. **No changes in `debrief-mcp`**: its
 `routing.propose` output *is* the input contract.
