@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+## [0.9.0] - 2026-11-14
+
+### Added
+
 - **`roles apply` / `roles set` — the human gate closing the debrief loop.**
   debrief proposes routing changes as text and never writes; buildwright now
   consumes that output verbatim: parses the `+ BW_ROLE_<ROLE>=<model>` lines,
