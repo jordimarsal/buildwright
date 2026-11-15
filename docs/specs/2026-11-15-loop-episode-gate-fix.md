@@ -81,3 +81,9 @@ global gitignore active) and once with
 `env -u BW_DEBRIEF_ROOT GIT_CONFIG_GLOBAL=/dev/null` — both isolation rows of §1 must
 read `passed`. `mypy src` clean; the named tests keep their names (they are the
 regression history); no `git add` of an ignored path in any run.
+
+## 6. Completion gate
+
+✅ Approved 2026-11-15 (commit `f001a55`, T1-T3; 131/131 in both isolation rows
+of §5 — with and without `BW_DEBRIEF_ROOT` and the global gitignore — `mypy src`
+clean, original test names kept, debrief contamination removed).
