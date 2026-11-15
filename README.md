@@ -183,6 +183,37 @@ max_gate_cycles: 3
 The unattended multi-phase design lives in
 `docs/specs/2026-10-27-harness-runtime-design.md`.
 
+## Agent economics (who burned the tokens)
+
+The run already records everything; nobody totals it. `bw economics` aggregates a
+run's Langfuse observations per **feature × role × model** — tokens in/out, cost in
+$, wall time — and joins the completion-gate verdict from the episode logs.
+
+```bash
+bw economics --run <run-id>              # human table to stdout
+bw economics --run <run-id> --json       # machine artifact → central debrief tree
+bw economics --run <run-id> --feature auth --json /tmp/auth.json
+```
+
+Exit codes: `0` report written · `1` no observations for the run · `65` Langfuse not
+configured (keys absent — nothing to read, never a fake report).
+
+Rules the report keeps (spec `2026-11-15-agent-economics-design.md`):
+
+- **Prices come from LiteLLM's table**, never a home-made one. A model missing from
+  the table → cost cell `?` — a number without provenance is worse than a gap.
+- **Cost is per-call summed, never extrapolated**: retries, failed calls and the
+  gate's review passes all count. An episode that died costs what it burned.
+- **The artifact carries a receipt header** — tool version, host, price source, run
+  id, timestamp — so a future reader can cite it (the same reason debrief's evidence
+  packs exist). Example: [`docs/examples/economics-artifact.json`](docs/examples/economics-artifact.json).
+- **No budget enforcement, no auto-switching.** v1 reports only. Deciding to switch
+  routing on cost is a gate policy decision (harness), not a reporting one.
+
+Debrief citation: the artifact lands in the central debrief tree, so a future
+`routing.propose` enrichment could read it as evidence ("this role's reviewer pass
+cost $0.006 on model X") — it is written, not yet read by that tool.
+
 ## Tests
 
 ```bash

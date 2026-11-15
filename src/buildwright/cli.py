@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from collections.abc import Callable
@@ -14,6 +15,12 @@ from langgraph.types import Command, RunnableConfig
 from . import debrief_log, runlog
 from .agents import Wright
 from .config import ROLES, Settings
+from .economics import (
+    aggregate as _aggregate,
+    fetch_traces as _fetch_traces,
+    price as _price,
+    read_gates as _read_gates,
+)
 from .graph import build_graph
 from .harness import Feature, HarnessProject, format_status
 from .loop import (
@@ -607,6 +614,60 @@ def _print_result(ctx: LoopContext, out: dict[str, Any]) -> None:
         _print_stats(state)
 
 
+def cmd_economics(settings: Settings, run_id: str, feature: str | None,
+                  json_path: str | None) -> int:
+    """`economics`: traces → aggregate → table + artifact. Langfuse keys absent → 65
+    (nothing to read, never a fake report)."""
+    tracer = get_tracer(settings)
+    client = getattr(tracer, "_client", None)
+    if client is None:
+        print("economics: Langfuse is not configured (keys absent) — nothing to read",
+              file=sys.stderr)
+        return 65
+    traces = _fetch_traces(client, run_id)
+    if feature:
+        traces = [t for t in traces if t["feature"] == feature]
+    if not traces:
+        print("economics: no observations for this run", file=sys.stderr)
+        return 1
+    for t in traces:
+        t["cost"] = _price(t["model"], t["tokens_in"], t["tokens_out"])
+    episodes = _read_gates(settings.debrief_root) if settings.debrief_root else []
+    report = _aggregate(traces, episodes)
+
+    print(f"{'feature':<24} {'role':<10} {'model':<24} {'in':>8} {'out':>8} "
+          f"{'$':>10} {'gate':>5}")
+    for feat in report["features"]:
+        for r in feat["roles"]:
+            cost = f"{r['cost']:.4f}" if r["cost"] is not None else "?"
+            gate = feat["gate"] or "?"
+            print(f"{feat['feature']:<24} {r['role']:<10} {r['model']:<24} "
+                  f"{r['tokens_in']:>8} {r['tokens_out']:>8} {cost:>10} {gate:>5}")
+        t = feat["totals"]
+        tc = f"{t['cost']:.4f}" if t["cost"] is not None else "?"
+        print(f"{'  total ' + feat['feature']:<24} {'':<10} {'':<24} "
+              f"{t['tokens_in']:>8} {t['tokens_out']:>8} {tc:>10} "
+              f"{feat['gate'] or '?':>5}")
+    if json_path:
+        # Receipt header: what produced these numbers, from where, with which price
+        # table — a number without provenance is worse than a gap (spec §4).
+        import socket
+        from . import __version__ as _bw_version
+        artifact = {
+            "tool": f"buildwright {_bw_version}",
+            "run_id": run_id,
+            "generated_at": datetime.now(UTC).isoformat(),
+            "host": socket.gethostname(),
+            "price_source": "litellm.cost_per_token",
+            "report": report,
+        }
+        p = Path(json_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(artifact, indent=1, ensure_ascii=False))
+        print(f"artifact: {p}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="buildwright",
@@ -634,6 +695,16 @@ def main(argv: list[str] | None = None) -> None:
     roles_set.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     ask = sub.add_parser("ask", help="run the plan -> execute -> review pipeline")
     ask.add_argument("task")
+
+    econ = sub.add_parser(
+        "economics",
+        help="cost/tokens/gates per feature and role, from Langfuse traces",
+    )
+    econ.add_argument("--run", required=True, help="Langfuse run (trace) id")
+    econ.add_argument("--feature", default=None, help="limit the report to one feature slug")
+    econ.add_argument("--json", dest="json_path", nargs="?", const="", default=None,
+                      help="write the artifact JSON (to PATH, or to the central "
+                           "debrief tree when PATH is omitted)")
 
     harness = sub.add_parser(
         "harness",
@@ -724,6 +795,12 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
     settings = Settings()
+    if args.cmd == "economics":
+        json_target = args.json_path
+        if json_target == "":
+            base = settings.debrief_root or (Path.cwd() / "artifacts")
+            json_target = str(base / "economics" / f"{args.run}.json")
+        sys.exit(cmd_economics(settings, args.run, args.feature, json_target))
 
     try:
         if args.cmd == "models":

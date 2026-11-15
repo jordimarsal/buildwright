@@ -1,0 +1,48 @@
+{
+ "tool": "buildwright 0.8.2",
+ "run_id": "2026-11-15T10-42Z",
+ "generated_at": "2026-11-15T10:45:00+00:00",
+ "host": "rig",
+ "price_source": "litellm.cost_per_token",
+ "note": "example artifact (docs) — SPEC_AUTHOR cost is '?' because the model is absent from LiteLLM's table: the report never guesses.",
+ "report": {
+  "features": [
+   {
+    "feature": "add_feature",
+    "gate": "pass",
+    "roles": [
+     {
+      "role": "BW_IMPLEMENTER",
+      "model": "local/qwen36-35b",
+      "tokens_in": 12400,
+      "tokens_out": 3100,
+      "seconds": 221.0,
+      "cost": 0.0142
+     },
+     {
+      "role": "BW_REVIEWER",
+      "model": "strata/qwen3.8-iq3",
+      "tokens_in": 5800,
+      "tokens_out": 900,
+      "seconds": 72.0,
+      "cost": 0.0061
+     },
+     {
+      "role": "BW_SPEC_AUTHOR",
+      "model": "local/sc117",
+      "tokens_in": 4100,
+      "tokens_out": 1500,
+      "seconds": 96.0,
+      "cost": null
+     }
+    ],
+    "totals": {
+     "tokens_in": 22300,
+     "tokens_out": 5500,
+     "seconds": 389.0,
+     "cost": 0.0203
+    }
+   }
+  ]
+ }
+}

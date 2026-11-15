@@ -70,18 +70,18 @@ computed from the catalog, never written to `models.yaml`.
 
 ## 5. Tasks (test-first, offline)
 
-- [ ] T1: `economics.py` aggregation core — pure functions over a captured trace/JSON
+- [x] T1: `economics.py` aggregation core — pure functions over a captured trace/JSON
       fixture (no Langfuse in tests): per feature/role/model totals, gate join, price
       lookup with the `?`-and-warn path. Tests: totals, missing-price, empty run.
       refs: §3, §4.
-- [ ] T2: Langfuse adapter — pull the run's traces (paged), map to episodes; adapter
+- [x] T2: Langfuse adapter — pull the run's traces (paged), map to episodes; adapter
       stubbed in tests; integration marked and skipped when no server.
       refs: §1, §3.
-- [ ] T3: `bw economics` CLI — `--run/--feature/--json`, stdout table, artifact write
+- [x] T3: `bw economics` CLI — `--run/--feature/--json`, stdout table, artifact write
       to the debrief tree with the receipt header (tool version, price source, host).
       Tests: CLI exit codes, artifact shape, tree placement.
       refs: §2, §3, §4.
-- [ ] T4: docs — README section + an example artifact under `docs/examples/`; the
+- [x] T4: docs — README section + an example artifact under `docs/examples/`; the
       debrief-citation note (what a future `routing.propose` enrichment could read).
       refs: §2.
 
