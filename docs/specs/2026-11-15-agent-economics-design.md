@@ -90,3 +90,8 @@ computed from the catalog, never written to `models.yaml`.
 pytest offline green (suite currently 105/107 — the 2 `test_loop` failures are a
 separate spec, `2026-11-15-loop-episode-gate-fix.md`); mypy `--strict` clean; one real
 run's artifact eyeballed against the Langfuse UI totals (±1 rounding on the sum).
+
+## 7. Completion gate
+
+✅ Approved 2026-11-15 (commit `c971c29`, 18 economics tests, suite 124/126,
+mypy src clean). T1-T4 done.

@@ -559,6 +559,12 @@ def _commit_debrief_evidence(ctx: LoopContext, message: str) -> None:
     if not ctx.debrief.path.exists():
         return
     root = ctx.project.root
+    # FIX A: git already ignores this path (repo .gitignore, the user's global
+    # gitignore, ...) -> it can never show up in `git status`, so the dirty-main
+    # problem this function prevents does not arise. Staging it anyway would
+    # make git refuse ("paths are ignored") and abort the whole finalize.
+    if _git(root, "check-ignore", "--quiet", str(rel)).returncode == 0:
+        return
     with MAIN_LOCK:
         _run_or_raise(root, ["add", str(rel)], "stage debrief evidence")
         if _git(root, "diff", "--cached", "--quiet").returncode != 0:

@@ -157,3 +157,55 @@ def find_open_episode(base: Path, project_name: str, feature: str) -> Path | Non
         if "result:" not in path.read_text(encoding="utf-8"):
             return path
     return None
+
+
+def _debrief_sink_at(
+    base: Path,
+    project: str,
+    feature: str,
+    roles: dict[str, str],
+) -> DebriefSink:
+    """Resolve or create a DebriefSink for *feature*.
+
+    1. Look for an open episode (no ``result:`` line) anywhere under *base*/*project*,
+       matching *feature* with any suffix (e.g. ``f2_hub_2.log``). If found, resume it.
+    2. Otherwise, generate today's minute-precise exec ID. If the canonical path
+       (``<feature>.log``) already exists and is closed, bump the filename until
+       a free path is found.
+    """
+    # Step 1: Try to resume a truly open episode from any previous exec dir.
+    existing_open = find_open_episode(base, project, feature)
+    if existing_open is not None:
+        return DebriefSink(
+            existing_open,
+            feature=feature,
+            engine=engine_build(),
+            roles=roles,
+        )
+
+    # Step 2: Create a new episode in the current minute's exec directory.
+    exec_id = f"exec{datetime.now(UTC):%Y%m%dT%H%MZ}"
+    candidate_dir = base / project / exec_id
+    candidate_path = candidate_dir / f"{feature}.log"
+
+    # The canonical path exists -> it must be CLOSED to be reusable as a name
+    # (find_open_episode already claimed any open one). Bump until free.
+    counter = 1
+    while True:
+        target_path = (
+            candidate_dir / f"{feature}_{counter}.log" if counter > 1 else candidate_path
+        )
+        if not target_path.exists():
+            break
+        if "result:" in target_path.read_text(encoding="utf-8"):
+            counter += 1
+            continue
+        break  # open but not found by the scan: resume it rather than fork it
+
+    return DebriefSink(
+        target_path,
+        feature=feature,
+        engine=engine_build(),
+        roles=roles,
+        run_id=f"{feature}-{datetime.now(UTC):%Y-%m-%dT%H-%MZ}",
+    )
