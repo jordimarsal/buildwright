@@ -49,6 +49,15 @@ def canonical_role(raw: str) -> tuple[str, str]:
     return upper.lower(), f"BW_ROLE_{upper}"
 
 
+@dataclass
+class _Entry:
+    """Mutable accumulation for one role while scanning lines."""
+
+    model: str
+    role_env: str
+    why: list[str] = field(default_factory=list)
+
+
 def parse_proposals(text: str) -> ParseResult:
     """Extract the apply candidates from debrief's proposal text.
 
@@ -58,7 +67,7 @@ def parse_proposals(text: str) -> ParseResult:
     (never silently pick first or last).
     """
     saw: dict[str, int] = {}
-    entries: dict[str, list] = {}  # role -> [model, role_env, why_list]
+    entries: dict[str, _Entry] = {}
     conflicts: list[str] = []
     last_role: str | None = None
 
@@ -73,12 +82,13 @@ def parse_proposals(text: str) -> ParseResult:
             role, role_env = canonical_role(m.group(1))
             model = m.group(2)
             prev = entries.get(role)
-            if prev is not None and prev[0] != model:
+            if prev is not None and prev.model != model:
                 conflicts.append(
-                    f"role {role} proposed twice with different models: {prev[0]} vs {model}"
+                    f"role {role} proposed twice with different models: {prev.model} vs {model}"
                 )
                 continue
-            entries.setdefault(role, [model, role_env, []])
+            if role not in entries:
+                entries[role] = _Entry(model=model, role_env=role_env)
             last_role = role
             continue
         if line.startswith("+ "):
@@ -88,13 +98,13 @@ def parse_proposals(text: str) -> ParseResult:
             if line.startswith(prefix):
                 saw[kind] = saw.get(kind, 0) + 1
                 if kind == "why" and last_role is not None:
-                    entries[last_role][2].append(line)
+                    entries[last_role].why.append(line)
                 break
 
     if conflicts:
         return ParseResult(candidates=(), conflicts=tuple(conflicts), saw=saw)
     candidates = tuple(
-        Candidate(role=role, role_env=entry[1], model=entry[0], why=tuple(entry[2]))
+        Candidate(role=role, role_env=entry.role_env, model=entry.model, why=tuple(entry.why))
         for role, entry in entries.items()
     )
     return ParseResult(candidates=candidates, saw=saw)
