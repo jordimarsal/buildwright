@@ -17,8 +17,14 @@ from .agents import Wright
 from .config import ROLES, Settings
 from .economics import (
     aggregate as _aggregate,
+)
+from .economics import (
     fetch_traces as _fetch_traces,
+)
+from .economics import (
     price as _price,
+)
+from .economics import (
     read_gates as _read_gates,
 )
 from .graph import build_graph
@@ -640,6 +646,7 @@ def cmd_economics(settings: Settings, run_id: str, feature: str | None,
         # Receipt header: what produced these numbers, from where, with which price
         # table — a number without provenance is worse than a gap (spec §4).
         import socket
+
         from . import __version__ as _bw_version
         artifact = {
             "tool": f"buildwright {_bw_version}",

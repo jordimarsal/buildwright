@@ -8,11 +8,10 @@ offline — observability must never break a run."""
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-__all__ = ["aggregate", "price", "cost_per_token", "fetch_traces"]
+__all__ = ["aggregate", "cost_per_token", "fetch_traces", "price"]
 
 
 def cost_per_token(model: str, prompt_tokens: int, completion_tokens: int) -> float:
@@ -21,7 +20,7 @@ def cost_per_token(model: str, prompt_tokens: int, completion_tokens: int) -> fl
     ``import buildwright.economics`` never pulls litellm at module load. Raises on
     unknown model / missing package — the caller (price) turns that into None → "?".
     """
-    from litellm import cost_per_token as _litellm_cost  # type: ignore[attr-defined] # noqa: PLC0415
+    from litellm import cost_per_token as _litellm_cost  # type: ignore[attr-defined]
 
     prompt_cost, completion_cost = _litellm_cost(
         model=model, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
