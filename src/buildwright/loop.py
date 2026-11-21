@@ -709,6 +709,14 @@ def _dispatch_prompt(ctx: LoopContext, state: LoopState, batch: list[Task]) -> s
         "gates via run_command (harness/init.sh must end [OK]); mark `- [x]` in "
         f"harness/specs/{feat.name}/tasks.md only when green.\n"
         f"Append what you did to harness/progress/impl_{feat.name}.md.\n"
+        "Project rules (non-negotiable): read and follow docs/conventions.md, and "
+        "docs/slicing-protocol.md when the spec has a Slice Map or a Completion "
+        "demo section. Recorded demos run against the REAL backend the spec "
+        "declares — never fabricate mock backends, invented tool names or fake "
+        "outputs; if the real backend cannot run, answer blocked naming the "
+        "failure. Never edit harness/feature_list.json — the loop owns feature "
+        "status. Leave no scratch or debug files outside the paths your tasks "
+        "name.\n"
     )
     feedback = state.get("dispatch_prompt", "")
     if feedback:

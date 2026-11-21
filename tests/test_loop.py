@@ -1073,3 +1073,28 @@ def test_spec_gate_fix_reworks_the_spec(tmp_path: Path):
     out2 = resume(ctx, "fix", "split R1 into two requirements", cfg)
     assert interrupt_payload(out2)["gate"] == "spec"  # reworked, back at the gate
     assert any("split R1" in p for p in spec.prompts)  # order reached the spec-author
+
+
+# ---------- dispatch prompt: project rules ----------
+
+
+def test_dispatch_prompt_carries_project_rules(tmp_path: Path):
+    """The worker never reads docs on its own — the prompt must carry the rules.
+
+    Regression for the mcp-plane S1/S2 incidents: mock backends in recorded
+    demos, feature_list edits by the worker, scratch files left behind.
+    """
+    from buildwright.loop import _dispatch_prompt
+    from buildwright.runtime import Task
+
+    root = make_repo(tmp_path)
+    ctx = ctx_for(root, dispatch=lambda p: "done", review=ScriptedReview(APPROVED))
+    batch = [Task(task_id="T1", text="one", done=False)]
+
+    prompt = _dispatch_prompt(ctx, {}, batch)
+
+    assert "docs/conventions.md" in prompt
+    assert "docs/slicing-protocol.md" in prompt
+    assert "never fabricate mock backends" in prompt
+    assert "feature_list.json" in prompt
+    assert "blocked" in prompt
