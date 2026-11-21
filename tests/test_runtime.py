@@ -194,3 +194,26 @@ def test_sync_worktree_discards_a_dirty_board(harness_repo: Path):
     merged = board_wt.read_text(encoding="utf-8")
     assert "p-main" in merged
     assert "p-worktree-dirty" not in merged
+
+
+def test_write_and_edit_on_readonly_file_return_error_not_raise(tmp_path: Path):
+    """Loop-owned files are 0444 in worktrees: a forbidden write must come back
+    as an ERROR feedback string (the worker adapts), never crash the graph."""
+    from buildwright.runtime import Sandbox, tool_edit_file, tool_write_file
+
+    sandbox = Sandbox(root=tmp_path)
+    locked = tmp_path / "harness" / "feature_list.json"
+    locked.parent.mkdir(parents=True)
+    locked.write_text('{"features": []}', encoding="utf-8")
+    locked.chmod(0o444)
+
+    write_result = tool_write_file(sandbox, "harness/feature_list.json", '{"hacked": 1}')
+    assert write_result.startswith("ERROR: write failed")
+    assert "read-only for the worker" in write_result
+    assert locked.read_text(encoding="utf-8") == '{"features": []}'  # untouched
+
+    edit_result = tool_edit_file(
+        sandbox, "harness/feature_list.json", '{"features": []}', '{"hacked": 1}'
+    )
+    assert edit_result.startswith("ERROR: edit failed")
+    assert locked.read_text(encoding="utf-8") == '{"features": []}'  # untouched

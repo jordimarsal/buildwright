@@ -151,8 +151,14 @@ def tool_write_file(sandbox: Sandbox, path: str, content: str) -> str:
         return f"ERROR: {exc}"
     if len(content) > 500_000:
         return "ERROR: content over 500000 chars — split the file"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        return (
+            f"ERROR: write failed: {exc} — loop-owned files (harness/feature_list.json, "
+            "harness/tools/) are read-only for the worker; the loop owns their state"
+        )
     return f"wrote {path} ({len(content)} chars)"
 
 
@@ -166,7 +172,13 @@ def tool_edit_file(sandbox: Sandbox, path: str, old: str, new: str) -> str:
     text = p.read_text(encoding="utf-8")
     if text.count(old) != 1:
         return f"ERROR: 'old' must occur exactly once in {path} (found {text.count(old)})"
-    p.write_text(text.replace(old, new), encoding="utf-8")
+    try:
+        p.write_text(text.replace(old, new), encoding="utf-8")
+    except OSError as exc:
+        return (
+            f"ERROR: edit failed: {exc} — loop-owned files (harness/feature_list.json, "
+            "harness/tools/) are read-only for the worker; the loop owns their state"
+        )
     return f"edited {path}"
 
 
