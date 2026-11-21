@@ -400,13 +400,15 @@ def test_spec_gate_reject_reworks_then_parks(tmp_path: Path):
     assert payload["gate"] == "parked"  # 2 rejections in a row → park blocked
     assert "spec rejected 2" in payload["reason"]
 
-    # the human fixes the spec themselves, then approves → re-author, re-gate
+    # the human fixes the spec ON DISK, then approves: the revision SURVIVES —
+    # no re-author (the park told them to revise it themselves); one approve
+    # verifies the on-disk trio and runs the loop to the end
+    spec_calls = len(spec.prompts)
     out4 = resume(ctx, "approve", "fixed it myself", cfg)
-    assert interrupt_payload(out4)["gate"] == "spec"  # the revised spec is gated again
-    out5 = resume(ctx, "approve", "now it's right", cfg)
-    assert interrupt_payload(out5)["gate"] == "completion"  # the loop ran to the end
-    out6 = resume(ctx, "approve", "ship it", cfg)
-    assert isinstance(out6, dict) and out6["finalized"] is True
+    assert interrupt_payload(out4)["gate"] == "completion"  # the loop ran to the end
+    assert len(spec.prompts) == spec_calls  # the spec-author was NOT called again
+    out5 = resume(ctx, "approve", "ship it", cfg)
+    assert isinstance(out5, dict) and out5["finalized"] is True
 
 
 def test_spec_incomplete_redispatches_then_stalls_out(tmp_path: Path):
@@ -1098,3 +1100,66 @@ def test_dispatch_prompt_carries_project_rules(tmp_path: Path):
     assert "never fabricate mock backends" in prompt
     assert "feature_list.json" in prompt
     assert "blocked" in prompt
+
+
+# ---------- parent-with-slices, trio note, settings anchor ----------
+
+
+def test_parent_with_slices_parks_instead_of_implementing(tmp_path: Path):
+    """A parent feature gates the slice map; it never enters implement_batch
+    (dispatching its gating tasks would cycle-cap on 'close at last slice')."""
+    root = make_repo(tmp_path, queue=True)
+    fl = root / "harness" / "feature_list.json"
+    data = json.loads(fl.read_text(encoding="utf-8"))
+    data["features"].append(
+        {
+            "id": 9,
+            "name": "f0_slice",
+            "title": "a slice of f0_new",
+            "description": "child feature",
+            "acceptance": ["it works"],
+            "status": "pending",
+            "part_of": "f0_new",
+        }
+    )
+    fl.write_text(json.dumps(data), encoding="utf-8")
+    dispatch = FakeDispatch(root, feature="f0_new")
+    ctx = ctx_for(
+        root, dispatch, ScriptedReview(APPROVED),
+        spec=ScriptedSpec(root, "f0_new"), feature="f0_new",
+    )
+    cfg = cfg_for("f0_new")
+
+    out = invoke(ctx, prepare_seed(ctx, None), cfg)
+    payload = interrupt_payload(out)
+    assert payload["gate"] == "spec"
+    out2 = resume(ctx, "approve", "map looks good", cfg)
+    payload2 = interrupt_payload(out2)
+    assert payload2["gate"] == "parked"
+    assert "slice map approved" in payload2["reason"]
+    assert "f0_slice" in payload2["reason"]
+    assert dispatch.prompts == []  # the worker was never dispatched
+
+
+def test_spec_author_reports_trio_bytes_not_return_chars(tmp_path: Path):
+    """The loop log reports what the author WROTE (files), not its return prose."""
+    root = make_repo(tmp_path)
+    ctx = ctx_for(root, lambda p: "done", ScriptedReview(APPROVED))
+    from buildwright.loop import _trio_note
+
+    base = ctx.worktree / "harness" / "specs" / ctx.feature.name
+    names = ("requirements.md", "design.md", "tasks.md")
+    before = sum((base / n).stat().st_size for n in names if (base / n).is_file())
+    assert _trio_note(ctx) == f"{before} bytes trio"
+    for name in names:
+        (base / name).write_text("x" * 100 + "\n", encoding="utf-8")
+    assert _trio_note(ctx) == "303 bytes trio"
+
+
+def test_make_context_anchors_env_file_to_project_root(tmp_path: Path, monkeypatch):
+    """Settings resolve from the PROJECT's .env, never from an accidental cwd."""
+    root = make_repo(tmp_path)
+    (root / ".env").write_text("BW_REQUEST_LIMIT=99\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)  # a cwd with no .env at all
+    ctx = ctx_for(root, lambda p: "done", ScriptedReview(APPROVED))
+    assert ctx.settings.request_limit == 99

@@ -231,6 +231,11 @@ def make_context(
     feat = next((f for f in project.feature_list.features if f.name == feature_name), None)
     if feat is None:
         raise KeyError(f"feature '{feature_name}' not found in {project.root}")
+    # Anchor configuration to the PROJECT root, not the process cwd: workers and
+    # resumed runs may resolve from a worktree, silently falling back to
+    # defaults (a 50-request limit instead of the .env's 150, say). `_env_file`
+    # is a pydantic-settings init kwarg its stubs do not declare.
+    settings = Settings(_env_file=project.root / ".env")  # type: ignore[call-arg]
     worktree = create_worktree(project.root, feat.name)
     sandbox = Sandbox.from_project(
         worktree, log_dir=worktree / "harness" / "logs" / feat.name
@@ -337,7 +342,7 @@ def _default_spec(ctx: LoopContext) -> Callable[[str], str]:
 
         result = agent.run_sync(prompt, deps=ctx.sandbox, usage_limits=_usage_limits(ctx))
         ctx.record_usage("planner", model_id, result.usage)
-        runlog.emit(f"spec-author → {len(result.output)} chars", ctx.project.root)
+        runlog.emit(f"spec-author → {_trio_note(ctx)}", ctx.project.root)
         return result.output
 
     return spec
@@ -872,6 +877,21 @@ def run_audit_gate(ctx: LoopContext) -> GateOutcome:
 # ---------- spec phase (pending → spec_ready → in_progress) ----------
 
 
+def _trio_note(ctx: LoopContext) -> str:
+    """What the author actually wrote: the trio's bytes on disk, not return prose.
+
+    The agent's return value is a one-liner ("done") — reporting its length
+    made every log say "(4 chars)" while the real files were kilobytes.
+    """
+    base = ctx.worktree / "harness" / "specs" / ctx.feature.name
+    total = sum(
+        (base / name).stat().st_size
+        for name in ("requirements.md", "design.md", "tasks.md")
+        if (base / name).is_file()
+    )
+    return f"{total} bytes trio"
+
+
 def verify_spec(ctx: LoopContext) -> tuple[bool, str]:
     """The spec trio exists and parses: requirements with R ids, tasks with T ids."""
     base = ctx.worktree / "harness" / "specs" / ctx.feature.name
@@ -903,26 +923,41 @@ def _spec_prompt(ctx: LoopContext, feedback: str) -> str:
     return prompt
 
 
+def _feature_status(ctx: LoopContext) -> str:
+    """Fresh status from main's feature_list — the ctx snapshot goes stale when
+    parks and resumes change status inside the same process."""
+    fresh = HarnessProject.load(ctx.project.root)
+    feat = next(
+        (f for f in fresh.feature_list.features if f.name == ctx.feature.name), None
+    )
+    return feat.status if feat else ctx.feature.status
+
+
 def _spec_node(ctx: LoopContext) -> LoopNode:
     """pending → spec_author → verify → spec_gate. Already in_progress → skip."""
 
     def node(state: LoopState) -> Command:
-        if ctx.feature.status in ("in_progress", "spec_ready"):
+        # never skip the author when a rework is pending: after a rejection the
+        # on-disk trio is the REJECTED one (valid shape, wrong content), and
+        # after the 2x-rejection park the human's revision must be verified —
+        # only then does the skip branch apply (park resume clears the rework)
+        reworking = bool(state.get("dispatch_prompt")) or state.get("spec_rounds", 0) > 0
+        if not reworking and _feature_status(ctx) in ("in_progress", "spec_ready"):
             # specs already prepared (and approved, or auto-approvable): skip the
             # spec phase and go straight to implementation when the trio is valid
             ok, _ = verify_spec(ctx)
             if ok:
-                if ctx.feature.status != "in_progress":
+                if _feature_status(ctx) != "in_progress":
                     set_feature_status(ctx.project.root, ctx.feature.name, "in_progress")
                     _commit_main_status(ctx.project.root, ctx.feature.name, "in_progress")
                 return Command(goto="implement_batch", update={"spec_approved": True})
             # invalid/missing trio: fall through and (re)author it
         # a stall re-dispatch opens with what was missing (state-borne feedback)
-        out = ctx.run_spec(_spec_prompt(ctx, state.get("dispatch_prompt", "")))
+        ctx.run_spec(_spec_prompt(ctx, state.get("dispatch_prompt", "")))
         cost = round(state.get("cost_usd", 0.0) + ctx.last_cost, 6)
         log = [
             *state.get("log", []),
-            f"spec: authored ({len(out)} chars)",
+            f"spec: authored ({_trio_note(ctx)})",
             *([state["dispatch_prompt"]] if state.get("dispatch_prompt") else []),
         ]
         ok, reason = verify_spec(ctx)
@@ -954,7 +989,7 @@ def _spec_node(ctx: LoopContext) -> LoopNode:
                 "spec-author",
                 ctx.settings.role_model("planner"),
                 "pass",
-                f"trio verified: {len(out)} chars",
+                f"trio verified: {_trio_note(ctx)}",
                 f"harness/specs/{ctx.feature.name}/design.md",
             )
         set_feature_status(ctx.project.root, ctx.feature.name, "spec_ready")
@@ -997,14 +1032,41 @@ def _spec_gate_node(ctx: LoopContext) -> LoopNode:
         if decision == "approve":
             set_feature_status(ctx.project.root, ctx.feature.name, "in_progress")
             _commit_main_status(ctx.project.root, ctx.feature.name, "in_progress")
+            slices = [
+                f for f in ctx.project.feature_list.features
+                if getattr(f, "part_of", None) == ctx.feature.name
+            ]
+            if slices:
+                # a parent with slices gates the map, it does not implement:
+                # dispatching its tasks would cycle-cap on "close at last slice"
+                return Command(
+                    goto="park",
+                    update={
+                        "park_reason": (
+                            f"slice map approved — {len(slices)} slices run as their "
+                            "own features ("
+                            + ", ".join(s.name for s in slices)
+                            + "); the parent waits and closes at the last slice's "
+                            "Completion Gate"
+                        ),
+                        "park_target": "spec_gate",
+                        "spec_approved": True,
+                        "log": [
+                            *log,
+                            f"spec gate: approve (parent of {len(slices)} slices — waits)",
+                        ],
+                    },
+                )
             batch = next_batch(_read_tasks(ctx), ctx.max_tasks)
             if not batch:
                 return Command(
                     goto="park",
                     update={
                         "park_reason": (
-                            "spec approved but tasks.md has no pending tasks — "
-                            "fix it and approve again"
+                            "spec approved but tasks.md has no pending tasks — a fix "
+                            "must land as new `- [ ] T<n>:` tasks in tasks.md (a fix "
+                            "without a task is noise: the dispatch only moves tasks); "
+                            "add them and approve again"
                         ),
                         "park_target": "spec_phase",
                         "log": [*log, "spec gate: no pending tasks after approval"],
@@ -1502,9 +1564,11 @@ def _park_node(ctx: LoopContext) -> LoopNode:
         decision, comments = _decision(answer)
         log = [*state.get("log", []), f"human gate: {decision} ({reason})"]
         if decision in ("approve", "fix"):
-            # a spec-phase park resumes as pending (the spec is re-authored and
-            # re-gated); implementation parks resume as in_progress
-            resume_status = "pending" if target == "spec_phase" else "in_progress"
+            # a spec-phase park resumes as spec_ready: the human revised the trio
+            # ON DISK (that is what the park told them to do), so the next entry
+            # verifies it and skips re-authoring — a revision must survive an
+            # approve, never be clobbered; implementation parks resume in_progress
+            resume_status = "spec_ready" if target == "spec_phase" else "in_progress"
             _commit_main_status(ctx.project.root, ctx.feature.name, resume_status)
             update: LoopState = {
                 "park_reason": "",

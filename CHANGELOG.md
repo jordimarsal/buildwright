@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Dispatch prompts carry project rules: read `docs/conventions.md` (and
+  `docs/slicing-protocol.md` when the spec has a Slice Map or demo section);
+  recorded demos run against the real backend the spec declares — never
+  fabricate mock backends or invented tools (`blocked` if it cannot run);
+  `feature_list.json` is off-limits to the worker; no scratch files outside
+  the tasks' paths. Found in the wild: two mock demos passed unit tests and a
+  lenient reviewer; only the live-demo requirement caught them.
+
+### Fixed
+
+- **A human-revised spec survives a park approve.** The 2×-rejection park told
+  the human to revise the trio on disk, but resuming reset the feature to
+  `pending` and re-authored over the revision. Spec-phase parks now resume as
+  `spec_ready`: the on-disk trio is verified and, when valid, implementation
+  starts without re-authoring. Rework-in-progress (rejections with feedback)
+  still re-authors — guarded by the rework state, and feature status is now
+  re-read from main so in-process resumes see park transitions.
+- **A parent feature with slices parks instead of implementing.** Approving a
+  parent whose slice map is gated now parks with "slice map approved — N
+  slices run as their own features" instead of dispatching its gating tasks
+  (which cycle-capped on "close at last slice").
+- **Settings anchor to the project root.** `make_context` resolves the `.env`
+  from the project root, not the process cwd — resumed runs and worktree
+  contexts no longer silently fall back to defaults (a 50-request limit
+  instead of the configured 150, say).
+- The spec-author's loop log reports the trio's bytes on disk ("3.7 KB trio"),
+  not the agent's return prose (every entry said "4 chars" while the real
+  files were kilobytes).
+- "No pending tasks after approval" parks now say it plainly: a fix must land
+  as new `- [ ] T<n>:` tasks — the dispatch only moves tasks.
+
 ## [0.9.0] - 2026-11-14
 
 ### Added
