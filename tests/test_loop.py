@@ -1163,3 +1163,82 @@ def test_make_context_anchors_env_file_to_project_root(tmp_path: Path, monkeypat
     monkeypatch.chdir(tmp_path)  # a cwd with no .env at all
     ctx = ctx_for(root, lambda p: "done", ScriptedReview(APPROVED))
     assert ctx.settings.request_limit == 99
+
+
+# ---------- parent auto-close + feature_list lock ----------
+
+
+def test_autoclose_parent_closes_when_last_slice_done(tmp_path: Path):
+    from buildwright.harness import HarnessProject
+    from buildwright.loop import autoclose_parent
+
+    root = make_repo(tmp_path)
+    fl = root / "harness" / "feature_list.json"
+    data = json.loads(fl.read_text(encoding="utf-8"))
+    data["features"] += [
+        {
+            "id": 8,
+            "name": "f2_parent",
+            "title": "parent of two slices",
+            "description": "gates the map",
+            "acceptance": ["closed by evidence"],
+            "status": "in_progress",
+        },
+        {
+            "id": 9,
+            "name": "f2_slice_a",
+            "title": "slice a",
+            "description": "",
+            "acceptance": ["a"],
+            "status": "done",
+            "part_of": "f2_parent",
+        },
+        {
+            "id": 10,
+            "name": "f2_slice_b",
+            "title": "slice b",
+            "description": "",
+            "acceptance": ["b"],
+            "status": "pending",
+            "part_of": "f2_parent",
+        },
+    ]
+    fl.write_text(json.dumps(data), encoding="utf-8")
+
+    project = HarnessProject.load(root)
+    slice_b = next(f for f in project.feature_list.features if f.name == "f2_slice_b")
+    # slice a done, slice b still pending -> parent waits
+    assert autoclose_parent(project, "f2_slice_a") is None
+    slice_b.status = "done"
+    note = autoclose_parent(project, "f2_slice_b")
+    assert note is not None and "auto-closed" in note and "f2_parent" in note
+    fresh = HarnessProject.load(root)
+    parent = next(f for f in fresh.feature_list.features if f.name == "f2_parent")
+    assert parent.status == "done"
+
+
+def test_autoclose_ignores_plain_features(tmp_path: Path):
+    from buildwright.harness import HarnessProject
+    from buildwright.loop import autoclose_parent
+
+    root = make_repo(tmp_path)
+    project = HarnessProject.load(root)
+    assert autoclose_parent(project, "f2_hub") is None  # no part_of anywhere
+
+
+def test_worktree_locks_feature_list_readonly(tmp_path: Path):
+    """The worker never edits feature_list.json — enforced at the OS level.
+
+    Observed in the wild (mcp-plane S1): the worker flipped itself to `done`
+    against explicit instructions.
+    """
+    import os
+    import stat
+
+    root = make_repo(tmp_path)
+    ctx = ctx_for(root, lambda p: "done", ScriptedReview(APPROVED))
+    fl = ctx.worktree / "harness" / "feature_list.json"
+    assert fl.is_file()
+    mode = stat.S_IMODE(fl.stat().st_mode)
+    assert mode & 0o222 == 0, f"feature_list.json is writable (mode {oct(mode)})"
+    assert os.access(fl, os.R_OK)  # still readable for the worker's context

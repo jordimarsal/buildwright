@@ -1,3 +1,4 @@
+import stat
 import subprocess
 from pathlib import Path
 
@@ -178,13 +179,16 @@ def test_sync_worktree_discards_a_dirty_board(harness_repo: Path):
     git(harness_repo, "commit", "-m", "chore(board): main rewrites the board")
 
     # the worktree mirror is dirty: the loop rewrote it without committing
+    # (the loop itself unlocks before writing — the 0444 lock is for workers)
     board_wt = wt / "harness" / "feature_list.json"
+    board_wt.chmod(0o644)
     board_wt.write_text(
         board_wt.read_text(encoding="utf-8").replace('"name": "p"', '"name": "p-worktree-dirty"'),
         encoding="utf-8",
     )
 
     sync_worktree(harness_repo, wt)  # must not raise
+    assert stat.S_IMODE(board_wt.stat().st_mode) & 0o222 == 0  # re-locked after sync
 
     # the local flip was discarded and main's state reached the worktree
     merged = board_wt.read_text(encoding="utf-8")

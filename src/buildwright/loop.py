@@ -285,7 +285,12 @@ def _default_dispatch(ctx: LoopContext) -> Callable[[str], str]:
         model_id = ctx.settings.role_model("worker")
         model = ctx.registry.build(model_id)
         agent = build_implementer(model, ctx.sandbox)
-        runlog.emit(f"worker ({model_id}): working…", ctx.project.root)
+        limits = _usage_limits(ctx)
+        runlog.emit(
+            f"worker ({model_id}): working…"
+            f" (request_limit={limits.request_limit if limits else 'none'})",
+            ctx.project.root,
+        )
         result = agent.run_sync(prompt, deps=ctx.sandbox, usage_limits=_usage_limits(ctx))
         ctx.record_usage("worker", model_id, result.usage)
         runlog.emit(f"worker → {_short(result.output)}", ctx.project.root)
@@ -640,6 +645,12 @@ def _finalize(ctx: LoopContext, state: LoopState) -> list[str]:
         # 5. status done — unreachable without the APPROVAL written above
         set_feature_status(root, feat.name, "done")
         lines.append(f"status: {feat.name} → done")
+
+        # 5b. parent auto-close: a parent never implements (it gates the slice
+        # map), so its closing is evidence-driven — every slice done = done
+        note = autoclose_parent(ctx.project, feat.name)
+        if note:
+            lines.append(note)
 
         # 6. history.md + retro line (append-only; marker keeps retries idempotent)
         history = root / "harness" / "progress" / "history.md"
@@ -1592,6 +1603,34 @@ def _park_node(ctx: LoopContext) -> LoopNode:
         return Command(goto=END, update={"log": log})
 
     return node
+
+
+# ---------- parent auto-close ----------
+
+
+def autoclose_parent(project: HarnessProject, done_slice: str) -> str | None:
+    """Close `parent` when its LAST slice finalizes.
+
+    A parent with `part_of` children never implements (it gates the slice map;
+    dispatching its tasks would cycle-cap on "close at last slice"), so its
+    own tasks cannot drive a finalize — the loop closes it by evidence: every
+    slice done = parent done. Returns the log line, or None when nothing to do.
+    """
+    features = project.feature_list.features
+    done = next((f for f in features if f.name == done_slice), None)
+    parent_name = getattr(done, "part_of", None)
+    if not parent_name:
+        return None
+    parent = next((f for f in features if f.name == parent_name), None)
+    if parent is None or parent.status == "done":
+        return None
+    siblings = [f for f in features if getattr(f, "part_of", None) == parent_name]
+    if not siblings or any(f.status != "done" for f in siblings):
+        return None
+    set_feature_status(project.root, parent_name, "done")
+    return (
+        f"parent {parent_name} → done (auto-closed: all {len(siblings)} slices done)"
+    )
 
 
 def _finalize_node(ctx: LoopContext) -> LoopNode:

@@ -319,30 +319,45 @@ def sync_worktree(root: Path, worktree: Path) -> None:
     """
     branch = _current_branch(worktree)
     main = _current_branch(root)
-    if branch is None or main is None or main == branch:
-        return
     board = worktree / "harness" / "feature_list.json"
-    if board.is_file() and _git(
-        worktree, "status", "--porcelain", "--", "harness/feature_list.json"
-    ).stdout.strip():
-        _git(worktree, "checkout", "--", "harness/feature_list.json")
-    if _git(worktree, "merge", "--ff-only", main).returncode == 0:
+    if branch is None or main is None or main == branch:
+        _lock_feature_list(board)
         return
-    merge = _git(worktree, *GIT_IDENTITY, "merge", main)
-    if merge.returncode == 0:
-        return
-    raise RuntimeError(
-        f"worktree {worktree} cannot be synced with {main}: "
-        f"{(merge.stderr or merge.stdout).strip()}\n"
-        "Finish the merge in the worktree (or `git merge --abort`) and re-run."
-    )
+    try:
+        if board.is_file():
+            board.chmod(0o644)  # the lock is for workers; the sync is the loop
+        if board.is_file() and _git(
+            worktree, "status", "--porcelain", "--", "harness/feature_list.json"
+        ).stdout.strip():
+            _git(worktree, "checkout", "--", "harness/feature_list.json")
+        if _git(worktree, "merge", "--ff-only", main).returncode == 0:
+            return
+        merge = _git(worktree, *GIT_IDENTITY, "merge", main)
+        if merge.returncode == 0:
+            return
+        raise RuntimeError(
+            f"worktree {worktree} cannot be synced with {main}: "
+            f"{(merge.stderr or merge.stdout).strip()}\n"
+            "Finish the merge in the worktree (or `git merge --abort`) and re-run."
+        )
+    finally:
+        _lock_feature_list(board)
 
 
 def create_worktree(root: Path, feature_name: str) -> Path:
-    """Create (or reuse) a git worktree for the feature, kept out of git status."""
+    """Create (or reuse) a git worktree for the feature, kept out of git status.
+
+    The worktree's `feature_list.json` is locked read-only (0444): feature
+    status belongs to the loop, never to the worker (a worker flipping itself
+    to `done` was observed in the wild — mcp-plane S1).
+    """
     wt = root / ".buildwright" / "worktrees" / feature_name
+    fl = wt / "harness" / "feature_list.json"
     if (wt / ".git").exists():
+        if fl.exists():
+            fl.chmod(0o644)  # let the sync update it
         sync_worktree(root, wt)
+        _lock_feature_list(fl)
         return wt
     branch = f"buildwright/{feature_name}"
     exists = subprocess.run(
@@ -361,7 +376,14 @@ def create_worktree(root: Path, feature_name: str) -> Path:
         sep = "" if not content or content.endswith("\n") else "\n"
         exclude.parent.mkdir(parents=True, exist_ok=True)
         exclude.write_text(content + sep + ".buildwright/\n", encoding="utf-8")
+    _lock_feature_list(fl)
     return wt
+
+
+def _lock_feature_list(fl: Path) -> None:
+    """0444 on the worktree's feature_list.json when present (harness projects)."""
+    if fl.is_file():
+        fl.chmod(0o444)
 
 
 # ---------- on-disk verification ----------
