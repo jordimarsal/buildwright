@@ -61,6 +61,27 @@ def test_build_remote_with_key(tmp_path, monkeypatch):
     assert model.model_name == "gpt-4o-mini"
 
 
+def test_max_tokens_optional_and_none_by_default(tmp_path):
+    registry = write_registry(tmp_path)
+    assert registry.spec("local/qwen3").max_tokens is None
+    model = registry.build("local/qwen3")  # sense max_tokens: cap settings al model
+    assert model.settings is None or model.settings == {}
+
+
+def test_max_tokens_flows_into_model_settings(tmp_path):
+    yaml = YAML.replace(
+        "    model: qwen3:8b",
+        "    model: qwen3:8b\n    max_tokens: 16384",
+    )
+    path = tmp_path / "models.yaml"
+    path.write_text(yaml, encoding="utf-8")
+    registry = ModelRegistry.load(path)
+    assert registry.spec("local/qwen3").max_tokens == 16384
+    model = registry.build("local/qwen3")
+    settings = getattr(model, "settings", None)
+    assert settings is not None and settings.get("max_tokens") == 16384
+
+
 def test_build_remote_key_comes_from_dotenv(tmp_path, monkeypatch):
     """`.env` documents provider keys — they must reach the client (D: config)."""
     monkeypatch.delenv("TEST_MODEL_KEY", raising=False)

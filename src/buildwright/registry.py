@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.settings import ModelSettings
 
 from buildwright.config import resolve_env
 
@@ -22,6 +23,7 @@ class ModelSpec(BaseModel):
     model: str | None = None  # "wire" name; defaults to the id without the prefix
     api_key_env: str | None = None
     context_window: int | None = None
+    max_tokens: int | None = None  # output budget per call; None = provider default
     input_price: float | None = None  # USD per million input tokens
     output_price: float | None = None  # USD per million output tokens
 
@@ -65,7 +67,11 @@ class ModelRegistry:
                     f"model '{s.id}' requires {s.api_key_env} "
                     "(not in the environment or .env)"
                 )
+        settings = None
+        if s.max_tokens is not None:
+            settings = ModelSettings(max_tokens=s.max_tokens)
         return OpenAIChatModel(
             s.model or s.id.split("/", 1)[1],
             provider=OpenAIProvider(base_url=s.base_url, api_key=api_key),
+            settings=settings,
         )
