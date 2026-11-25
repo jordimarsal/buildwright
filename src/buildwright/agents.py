@@ -68,7 +68,7 @@ class Wright:
         return Agent(
             self.model_for("reviewer"),
             output_type=Review,
-            output_retries=3,  # models locals (p.ex. Strata) fallen el format JSON al primer intent
+            retries=3,  # models locals (p.ex. Strata) fallen el format JSON al primer intent
             instructions=(
                 "You are a strict reviewer. Judge the work against the task; "
                 "reply verdict pass or fail with short comments."
