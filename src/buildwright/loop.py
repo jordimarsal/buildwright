@@ -811,7 +811,7 @@ def _run_gate(
     # El sandbox trunca sortides llargues i afegeix una línea d'archiu al
     # final; no és output del gate i amagava el marcador [OK] de l'última
     # línia (fals FAILED exit 0 amb sortides grans — S3/S4 de farga-tui).
-    lines = [ln for ln in lines if not ln.startswith("… (full output archived:")]
+    lines = [ln for ln in lines if "full output archived:" not in ln]
     last = lines[-1] if lines else ""
     if code == 0 and (not require_ok_marker or "[OK]" in last):
         return GateOutcome(True, "", f"{name}: green ({command})")
