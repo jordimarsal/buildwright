@@ -578,6 +578,18 @@ def test_run_init_gate_ok_fail_and_marker(tmp_path: Path):
     assert run_init_gate(ctx).ok
 
 
+def test_run_init_gate_long_output_truncation_marker_is_not_failure(tmp_path: Path):
+    """Sortida llarga: el sandbox trunca i afegeix el marcador d'archiu com a
+    última línia — no pot amagar el [OK] del resum final (fals FAILED exit 0,
+    S3/S4 farga-tui)."""
+    root = make_repo(tmp_path, init_sh="#!/bin/bash\nseq 1 20000\necho '[OK]'\n")
+    ctx = ctx_for(root, FakeDispatch(root), ScriptedReview(APPROVED))
+
+    outcome = run_init_gate(ctx)
+    assert outcome.ok, outcome.log
+
+
+
 def test_run_trace_gate_skips_and_fails(tmp_path: Path):
     root = make_repo(tmp_path)
     ctx = ctx_for(root, FakeDispatch(root), ScriptedReview(APPROVED))
