@@ -1221,7 +1221,13 @@ def test_autoclose_parent_closes_when_last_slice_done(tmp_path: Path):
     slice_b = next(f for f in project.feature_list.features if f.name == "f2_slice_b")
     # slice a done, slice b still pending -> parent waits
     assert autoclose_parent(project, "f2_slice_a") is None
-    slice_b.status = "done"
+    # the REAL path flips status on DISK only; the in-memory snapshot stays
+    # stale (set_feature_status doesn't mutate it) — the parent must still
+    # close by re-reading the evidence (farga-tui S5 regression)
+    from buildwright.loop import set_feature_status
+
+    set_feature_status(root, "f2_slice_b", "done")
+    assert slice_b.status == "pending"  # stale snapshot, as in the loop
     note = autoclose_parent(project, "f2_slice_b")
     assert note is not None and "auto-closed" in note and "f2_parent" in note
     fresh = HarnessProject.load(root)

@@ -1619,8 +1619,13 @@ def autoclose_parent(project: HarnessProject, done_slice: str) -> str | None:
     dispatching its tasks would cycle-cap on "close at last slice"), so its
     own tasks cannot drive a finalize — the loop closes it by evidence: every
     slice done = parent done. Returns the log line, or None when nothing to do.
+
+    The evidence is re-read from disk: `set_feature_status` above writes the
+    file but leaves the in-memory snapshot stale, and the just-closed slice
+    would otherwise still look `in_progress` and block its own parent forever
+    (found in farga-tui S5, 2026-11-25).
     """
-    features = project.feature_list.features
+    features = HarnessProject.load(project.root).feature_list.features
     done = next((f for f in features if f.name == done_slice), None)
     parent_name = getattr(done, "part_of", None)
     if not parent_name:
