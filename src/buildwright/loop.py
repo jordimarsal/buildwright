@@ -33,8 +33,9 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, StateSnapshot, interrupt
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.usage import UsageLimits
 
 from . import debrief_log, runlog
@@ -370,6 +371,70 @@ and unfixed — do not negotiate with quality. APPROVED means you would bet prod
 traffic on this diff."""
 
 
+def _sandbox_tools(agent: Agent[Sandbox, Any]) -> None:
+    @agent.tool
+    def read_file(run_ctx: RunContext[Sandbox], path: str) -> str:
+        """Read a file from the worktree."""
+        return tool_read_file(run_ctx.deps, path)
+
+    @agent.tool
+    def list_dir(run_ctx: RunContext[Sandbox], path: str = ".") -> str:
+        """List a directory of the worktree."""
+        return tool_list_dir(run_ctx.deps, path)
+
+    @agent.tool
+    def run_command(run_ctx: RunContext[Sandbox], command: str) -> str:
+        """Run an allowlisted command (tests, gates) in the worktree."""
+        return tool_run_command(run_ctx.deps, command)
+
+
+def _parse_verdict(text: str, model_type: type[BaseModel]) -> Any:
+    """The verdict is the LAST JSON object in the answer; prose before it is fine."""
+    decoder = json.JSONDecoder()
+    for idx in range(len(text) - 1, -1, -1):
+        if text[idx] != "{":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(text[idx:])
+            return model_type.model_validate(obj)
+        except (json.JSONDecodeError, ValidationError):
+            continue
+    raise RuntimeError(
+        f"no valid {model_type.__name__} JSON in the model answer: {text[-300:]!r}"
+    )
+
+
+def _prompted_verdict(
+    ctx: LoopContext,
+    role: str,
+    model_id: str,
+    prompt: str,
+    schema_model: type[BaseModel],
+    instructions: str,
+) -> Any:
+    """Fallback for servers that cannot combine structured output with tools.
+
+    llama.cpp/Strata answer the tool-mode `final_result` call as plain text and
+    refuse `response_format` next to tools, so rerun with text output (same
+    sandbox tools) and parse the last JSON object ourselves.
+    """
+    schema = json.dumps(schema_model.model_json_schema(), ensure_ascii=False)
+    agent: Agent[Sandbox, str] = Agent(
+        ctx.registry.build(model_id),
+        deps_type=Sandbox,
+        retries=3,  # models locals fallen el format al primer intent
+        instructions=(
+            instructions
+            + "\n\nFinish with ONE JSON object on its own and nothing after it, "
+            f"exactly matching this JSON Schema: {schema}"
+        ),
+    )
+    _sandbox_tools(agent)
+    result = agent.run_sync(prompt, deps=ctx.sandbox, usage_limits=_usage_limits(ctx))
+    ctx.record_usage(role, model_id, result.usage)
+    return _parse_verdict(result.output, schema_model)
+
+
 def _default_gauntlet(ctx: LoopContext) -> Callable[[str], GauntletVerdict]:
     def gauntlet(prompt: str) -> GauntletVerdict:
         model_id = ctx.settings.role_model("reviewer")
@@ -378,33 +443,24 @@ def _default_gauntlet(ctx: LoopContext) -> Callable[[str], GauntletVerdict]:
             model,
             output_type=GauntletVerdict,
             deps_type=Sandbox,
+            retries=3,  # models locals fallen el format del verdict al primer intent
             instructions=GAUNTLET_INSTRUCTIONS,
         )
         runlog.emit(f"gauntlet reviewer ({model_id}): G2+G3 pass…", ctx.project.root)
-
-        @agent.tool
-        def read_file(run_ctx: RunContext[Sandbox], path: str) -> str:
-            """Read a file from the worktree."""
-            return tool_read_file(run_ctx.deps, path)
-
-        @agent.tool
-        def list_dir(run_ctx: RunContext[Sandbox], path: str = ".") -> str:
-            """List a directory of the worktree."""
-            return tool_list_dir(run_ctx.deps, path)
-
-        @agent.tool
-        def run_command(run_ctx: RunContext[Sandbox], command: str) -> str:
-            """Run an allowlisted command (tests, gates) in the worktree."""
-            return tool_run_command(run_ctx.deps, command)
-
-        result = agent.run_sync(prompt, deps=ctx.sandbox, usage_limits=_usage_limits(ctx))
-        ctx.record_usage("reviewer", model_id, result.usage)
+        _sandbox_tools(agent)
+        try:
+            result = agent.run_sync(prompt, deps=ctx.sandbox, usage_limits=_usage_limits(ctx))
+            ctx.record_usage("reviewer", model_id, result.usage)
+            verdict = result.output
+        except UnexpectedModelBehavior:
+            verdict = _prompted_verdict(
+                ctx, "reviewer", model_id, prompt, GauntletVerdict, GAUNTLET_INSTRUCTIONS
+            )
         runlog.emit(
-            f"gauntlet → {result.output.verdict} "
-            f"({len(result.output.g2_findings)} G2 findings)",
+            f"gauntlet → {verdict.verdict} ({len(verdict.g2_findings)} G2 findings)",
             ctx.project.root,
         )
-        return result.output
+        return verdict
 
     return gauntlet
 
@@ -417,33 +473,25 @@ def _default_review(ctx: LoopContext) -> Callable[[str], ReviewVerdict]:
             model,
             output_type=ReviewVerdict,
             deps_type=Sandbox,
+            retries=3,  # models locals fallen el format del verdict al primer intent
             instructions=REVIEW_INSTRUCTIONS,
         )
         runlog.emit(f"reviewer ({model_id}): reviewing…", ctx.project.root)
-
-        @agent.tool
-        def read_file(run_ctx: RunContext[Sandbox], path: str) -> str:
-            """Read a file from the worktree."""
-            return tool_read_file(run_ctx.deps, path)
-
-        @agent.tool
-        def list_dir(run_ctx: RunContext[Sandbox], path: str = ".") -> str:
-            """List a directory of the worktree."""
-            return tool_list_dir(run_ctx.deps, path)
-
-        @agent.tool
-        def run_command(run_ctx: RunContext[Sandbox], command: str) -> str:
-            """Run an allowlisted command (tests, gates) in the worktree."""
-            return tool_run_command(run_ctx.deps, command)
-
-        result = agent.run_sync(prompt, deps=ctx.sandbox, usage_limits=_usage_limits(ctx))
-        ctx.record_usage("reviewer", model_id, result.usage)
+        _sandbox_tools(agent)
+        try:
+            result = agent.run_sync(prompt, deps=ctx.sandbox, usage_limits=_usage_limits(ctx))
+            ctx.record_usage("reviewer", model_id, result.usage)
+            verdict = result.output
+        except UnexpectedModelBehavior:
+            verdict = _prompted_verdict(
+                ctx, "reviewer", model_id, prompt, ReviewVerdict, REVIEW_INSTRUCTIONS
+            )
         runlog.emit(
-            f"reviewer → {result.output.verdict} "
-            f"({len(result.output.required_changes)} required changes)",
+            f"reviewer → {verdict.verdict} "
+            f"({len(verdict.required_changes)} required changes)",
             ctx.project.root,
         )
-        return result.output
+        return verdict
 
     return review
 
